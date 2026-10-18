@@ -2,8 +2,8 @@
 
 Learning HyperEVM by building a lending market (HypurrFi-style): borrow USDC against HYPE.
 
-Status (2026-10-18): step 1 done, Codex review rounds 1–2 fixed (`docs/reviews/`). A minimal
-market (`src/LendingMarket.sol`, 18 tests) ran on
+Status (2026-10-18): step 1 done, Codex review rounds 1–3 fixed (`docs/reviews/`). A minimal
+market (`src/LendingMarket.sol`, 20 tests) ran on
 testnet: supply, collateral, borrow, repay, withdraw (`docs/step1-market.md`). A learning
 project, not audited, not for real funds.
 

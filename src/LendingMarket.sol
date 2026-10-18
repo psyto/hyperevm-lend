@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
 import {HLPrecompiles} from "hl-price-guard/HLPrecompiles.sol";
+import {FullMath} from "./FullMath.sol";
 
 interface IERC20 {
     function balanceOf(address who) external view returns (uint256);
@@ -31,6 +32,10 @@ contract LendingMarket {
     /// Virtual shares and assets, so the first supplier cannot inflate the share price.
     uint256 internal constant VIRTUAL_SHARES = 1e6;
     uint256 internal constant VIRTUAL_ASSETS = 1;
+    /// Debt shares are counted this much finer than the index, so even after decades of interest
+    /// one share stays a negligible amount of USDC (review r3: coarse shares stranded dust).
+    uint256 internal constant SHARE_SCALE = 1e18;
+    uint256 internal constant SHARE_UNIT = WAD * SHARE_SCALE;
 
     uint256 public constant MAX_LTV_BPS = 6_000; // borrow up to 60% of collateral value
     uint256 public constant LIQ_LTV_BPS = 7_500; // liquidatable above 75%
@@ -216,7 +221,7 @@ contract LendingMarket {
         _accrue();
         uint256 c = cash();
         if (amount > c) revert NotEnoughCash(c);
-        uint256 s = _divUp(amount * WAD, borrowIndex); // round the debt up
+        uint256 s = FullMath.mulDivUp(amount, SHARE_UNIT, borrowIndex); // round the debt up
         debtShares[msg.sender] += s;
         totalDebtShares += s;
         _requireHealthy(msg.sender, MAX_LTV_BPS);
@@ -253,8 +258,15 @@ contract LendingMarket {
             // not enough collateral for the bonus: repay only what all of it covers
             repayAmt = coll * price / WAD * BPS / (BPS + LIQ_BONUS_BPS) / 1e12;
         }
-        uint256 paid = _reduceDebt(borrower, repayAmt); // what the burned debt shares are worth
-        seized = _seizeFor(paid, price);
+        uint256 paid;
+        if (repayAmt == 0 && _value(coll, price) < DUST_USDC) {
+            // the collateral is worth less than DUST_USDC and buys nothing: take it and write the
+            // debt off below, rather than leave the position stuck (review r3)
+            seized = coll;
+        } else {
+            paid = _reduceDebt(borrower, repayAmt); // what the burned debt shares are worth
+            seized = _seizeFor(paid, price);
+        }
         // Decided on what was actually paid (review r2). What is left after the seize: all of it
         // goes when it is worth under DUST_USDC, so rounding cannot leave dust that blocks the
         // bad-debt write-off, and the liquidator can never get more than that for free.
@@ -269,7 +281,7 @@ contract LendingMarket {
             // the buffer takes the loss first, suppliers the rest
             reserves -= badDebt < reserves ? badDebt : reserves;
         }
-        _pull(paid);
+        if (paid > 0) _pull(paid);
         _sendHype(msg.sender, seized);
         emit Liquidate(msg.sender, borrower, paid, seized, badDebt);
     }
@@ -296,7 +308,7 @@ contract LendingMarket {
         if (amount >= debt) {
             (burn, paid) = (s, debt);
         } else {
-            burn = amount * WAD / borrowIndex; // round the shares burned down
+            burn = FullMath.mulDiv(amount, SHARE_UNIT, borrowIndex); // round the shares burned down
             paid = _mulUp(burn, borrowIndex); // <= amount
         }
         if (burn == 0) revert Zero();
@@ -320,8 +332,8 @@ contract LendingMarket {
         // compounded per second, so the result does not depend on how often anyone calls
         // (review r1: simple interest per call let anyone compound a borrower's debt faster)
         uint256 factor = _rpow(WAD + rate / YEAR, dt);
-        uint256 newIndex = index * factor / WAD;
-        uint256 interest = totalDebtShares * (newIndex - index) / WAD;
+        uint256 newIndex = FullMath.mulDiv(index, factor, WAD);
+        uint256 interest = FullMath.mulDiv(totalDebtShares, newIndex - index, SHARE_UNIT);
         index = newIndex;
         res = res + interest * RESERVE_FACTOR_BPS / BPS;
     }
@@ -330,9 +342,10 @@ contract LendingMarket {
     function _rpow(uint256 x, uint256 n) internal pure returns (uint256 z) {
         z = WAD;
         while (n > 0) {
-            if (n & 1 == 1) z = z * x / WAD;
+            // full-precision products: revert only if the result itself cannot fit (review r2, r3)
+            if (n & 1 == 1) z = FullMath.mulDiv(z, x, WAD);
             n >>= 1;
-            if (n > 0) x = x * x / WAD; // no square after the last bit (review r2: it overflowed)
+            if (n > 0) x = FullMath.mulDiv(x, x, WAD); // no square after the last bit
         }
     }
 
@@ -347,8 +360,9 @@ contract LendingMarket {
         return hype * price / WAD / 1e12;
     }
 
+    /// USDC worth of `shares` debt shares at `index`, rounded up.
     function _mulUp(uint256 shares, uint256 index) internal pure returns (uint256) {
-        return _divUp(shares * index, WAD);
+        return FullMath.mulDivUp(shares, index, SHARE_UNIT);
     }
 
     function _divUp(uint256 a, uint256 b) internal pure returns (uint256) {

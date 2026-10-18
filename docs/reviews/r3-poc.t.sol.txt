@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {LendingMarket, IERC20} from "../../src/LendingMarket.sol";
+
+contract Round3USDC {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract LendingMarketRound3FixesPoC is Test {
+    address internal constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address internal constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address internal constant BBO = 0x000000000000000000000000000000000000080e;
+    uint32 internal constant HYPE_PERP = 135;
+    uint256 internal constant WAD = 1e18;
+    uint256 internal constant YEAR = 365 days;
+
+    function _quote(uint64 price4) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(HYPE_PERP), abi.encode(price4));
+        vm.mockCall(MARK_PX, abi.encode(HYPE_PERP), abi.encode(price4));
+        vm.mockCall(BBO, abi.encode(HYPE_PERP), abi.encode(price4 - 1, price4 + 1));
+    }
+
+    function _market() internal returns (LendingMarket market, Round3USDC usdc) {
+        usdc = new Round3USDC();
+        market = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+    }
+
+    function _supply(Round3USDC usdc, LendingMarket market, address lender, uint256 amount) internal {
+        usdc.mint(lender, amount);
+        vm.startPrank(lender);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(amount);
+        vm.stopPrank();
+    }
+
+    function test_dustRuleCanTransferThousandsOfHypeButLessThanOneUsdcOfValue() public {
+        (LendingMarket market, Round3USDC usdc) = _market();
+        address lender = address(1);
+        address borrower = address(2);
+        address liquidator = address(3);
+        _quote(40e4);
+        _supply(usdc, market, lender, 1_000e6);
+
+        // At $40, this readily supports the $1 borrow.  At $0.0001 it is worth $0.9999.
+        vm.deal(borrower, 9_999 ether);
+        vm.startPrank(borrower);
+        market.depositCollateral{value: 9_999 ether}();
+        market.borrow(1e6);
+        vm.stopPrank();
+        usdc.mint(liquidator, 1e6);
+        vm.prank(liquidator);
+        usdc.approve(address(market), type(uint256).max);
+
+        _quote(1); // $0.0001/HYPE; 9,999 HYPE = $0.9999
+        vm.prank(liquidator);
+        uint256 seized = market.liquidate(borrower, type(uint256).max);
+
+        // The half-debt payment buys 5,250 HYPE; the dust rule also transfers 4,749 HYPE.
+        // That apparently large token amount is only $0.4749 at the liquidation price.
+        assertEq(seized, 9_999 ether);
+        assertEq(market.collateral(borrower), 0);
+        assertEq(market.debtShares(borrower), 0); // write-off occurs only after the full seize
+        assertEq(usdc.balanceOf(liquidator), 500_000);
+        emit log_named_uint("extra HYPE transferred by dust rule (wei)", 4_749 ether);
+        emit log_named_uint("value of extra HYPE (USDC base units)", 474_900);
+    }
+
+    function test_POC_subDollarCollateralCanStillBlockWriteoffBeforeDustRule() public {
+        (LendingMarket market, Round3USDC usdc) = _market();
+        address lender = address(4);
+        address borrower = address(5);
+        address liquidator = address(6);
+        _quote(40e4);
+        _supply(usdc, market, lender, 1_000e6);
+
+        // 100% utilisation for 28 years makes a single debt share worth > $1 million.
+        vm.deal(borrower, 50 ether);
+        vm.startPrank(borrower);
+        market.depositCollateral{value: 50 ether}();
+        market.borrow(1_000e6);
+        vm.stopPrank();
+        skip(28 * 365 days);
+        usdc.mint(liquidator, 2_000_000e6);
+        vm.prank(liquidator);
+        usdc.approve(address(market), type(uint256).max);
+
+        // The entire position is $0.99.  The dust branch should dispose of it, but it is after
+        // _reduceDebt: the collateral-backed repayment is too small to burn even one share.
+        _quote(198); // $0.0198/HYPE; 50 HYPE = $0.99
+        uint256 beforeShares = market.debtShares(borrower);
+        vm.prank(liquidator);
+        vm.expectRevert(LendingMarket.Zero.selector);
+        market.liquidate(borrower, type(uint256).max);
+
+        assertEq(market.collateral(borrower), 50 ether);
+        assertEq(market.debtShares(borrower), beforeShares);
+        emit log_named_uint("stranded collateral value (USDC base units)", 990_000);
+        emit log_named_uint("debt-share count", beforeShares);
+    }
+
+    function test_rpowHandlesZeroOneTwoAndLongExponents() public {
+        // n = 0, 1, and 2 are checked against the direct multiplication identities.
+        (LendingMarket m0,) = _fullUtilisedMarket();
+        assertEq(m0.debtOf(address(8)), 1_000e6);
+
+        (LendingMarket m1,) = _fullUtilisedMarket();
+        skip(1);
+        uint256 x = WAD + WAD / YEAR;
+        assertEq(m1.debtOf(address(8)), _divUp(1_000e6 * x, WAD));
+
+        (LendingMarket m2,) = _fullUtilisedMarket();
+        skip(2);
+        uint256 xSquared = x * x / WAD;
+        assertEq(m2.debtOf(address(8)), _divUp(1_000e6 * xSquared, WAD));
+
+        // 2^31 seconds is the previous overflow boundary.  e^68 is representable, so this
+        // must return; its value is independently bounded around the expected e^68.1 factor.
+        (LendingMarket longIdle,) = _fullUtilisedMarket();
+        skip(2 ** 31);
+        uint256 debt = longIdle.debtOf(address(8));
+        assertGt(debt, 3e38);
+        assertLt(debt, 5e38);
+        emit log_named_uint("debt after 2^31 seconds (USDC base units)", debt);
+    }
+
+    function test_POC_rpowStillOverflowsForRepresentableResultAtAboutOneHundredTwoYears() public {
+        (LendingMarket market,) = _fullUtilisedMarket();
+
+        // (1 + 1/YEAR)^(3 * 2^30) is about e^102.1.  Its WAD representation is about 2e62,
+        // safely below uint256.max (~1e77).  But the final z * x is performed before division
+        // by WAD, so its roughly 1e80 intermediate product overflows.
+        skip(3 * 2 ** 30);
+        vm.expectRevert();
+        market.debtOf(address(8));
+    }
+
+    function _fullUtilisedMarket() internal returns (LendingMarket market, Round3USDC usdc) {
+        (market, usdc) = _market();
+        address lender = address(7);
+        address borrower = address(8);
+        _quote(40e4);
+        _supply(usdc, market, lender, 1_000e6);
+        vm.deal(borrower, 100 ether);
+        vm.startPrank(borrower);
+        market.depositCollateral{value: 100 ether}();
+        market.borrow(1_000e6); // cash is zero, so the rate is exactly 100% per year
+        vm.stopPrank();
+    }
+
+    function _divUp(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a == 0 ? 0 : (a - 1) / b + 1;
+    }
+}

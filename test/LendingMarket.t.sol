@@ -279,16 +279,20 @@ contract LendingMarketTest is Test {
         assertApproxEqRel(a, 2_718_281_828, 1e15); // 1,000 × e^1
     }
 
-    /// r1 low: a repayment too small to burn a debt share is refused, not taken.
-    function test_r1_dustRepayRefused() public {
+    /// r1 low: a repayment never takes USDC without reducing the debt by as much. (With the
+    /// finer debt shares of r3, even 1 unit now burns shares.)
+    function test_r1_dustRepayReducesDebt() public {
         vm.prank(borrower);
         market.borrow(240e6);
         skip(1);
         uint256 before = usdc.balanceOf(borrower);
+        uint256 debt0 = market.debtOf(borrower);
         vm.prank(borrower);
-        vm.expectRevert(LendingMarket.Zero.selector);
-        market.repay(borrower, 1);
-        assertEq(usdc.balanceOf(borrower), before);
+        uint256 paid = market.repay(borrower, 1);
+        assertLe(paid, 1);
+        assertEq(before - usdc.balanceOf(borrower), paid);
+        assertLe(market.debtOf(borrower), debt0 - paid + 1); // reduced by what was paid (up to rounding up)
+        assertLt(market.debtShares(borrower), 240e6 * 1e18);
     }
 
     // ------------------------------------------------------------ review r2
@@ -315,6 +319,29 @@ contract LendingMarketTest is Test {
         vm.prank(borrower);
         market.borrow(240e6);
         skip(2 ** 31);
+        market.debtOf(borrower);
+    }
+
+    // ------------------------------------------------------------ review r3
+
+    /// r3 low: collateral worth under 1 USDC that buys nothing is taken and the debt written off,
+    /// instead of the position being stuck forever.
+    function test_r3_subDollarCollateralIsWrittenOff() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        _setPrice(1); // 0.0001 USD per HYPE: 10 HYPE worth 0.001 USDC
+        vm.prank(liquidator);
+        uint256 seized = market.liquidate(borrower, type(uint256).max);
+        assertEq(seized, 10 ether);
+        assertEq(market.collateral(borrower), 0);
+        assertEq(market.debtShares(borrower), 0);
+    }
+
+    /// r3 low: a market left alone for ~102 years still reads (full-precision products).
+    function test_r3_rpowNoOverflowAt102Years() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        skip(3 * 2 ** 30);
         market.debtOf(borrower);
     }
 }
