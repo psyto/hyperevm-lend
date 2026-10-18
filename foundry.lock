@@ -1,0 +1,17 @@
+{
+  "lib/forge-std": {
+    "tag": {
+      "name": "v1.17.0",
+      "rev": "f3dae6e6ee381f25eb6a246f7da9b85c91a68219"
+    }
+  },
+  "lib/hl-price-guard": {
+    "tag": {
+      "name": "v0.2.1",
+      "rev": "f18cdd428546fc136bef88f7a591344147b51bc3"
+    }
+  },
+  "lib/hyperevm-amm": {
+    "rev": "acfa6f2427980205ddda5cb2f144d831e7192595"
+  }
+}
