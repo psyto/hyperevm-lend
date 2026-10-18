@@ -431,7 +431,7 @@ contract LendingMarketTest is Test {
 
     // ------------------------------------------------------------ review r7
 
-    /// r7 low: after 82 years at 100% utilisation (debt ~4e47 base units), with 1B HYPE of
+    /// r7 low: after 82 years at 100% utilisation (debt ~2e47 base units), with 1B HYPE of
     /// collateral, liquidation still completes: the paths are chosen on USDC amounts and every
     /// product with the debt goes through mulDiv.
     function test_r7_liquidationAfter82Years() public {
@@ -439,12 +439,12 @@ contract LendingMarketTest is Test {
         vm.prank(lender);
         usdc.approve(address(m), type(uint256).max);
         vm.prank(lender);
-        m.supply(1_000_000e6);
+        m.supply(500_000e6); // the lender has 999,000 left after setUp
         address whale = address(0xB16);
         vm.deal(whale, 1e27);
         vm.startPrank(whale);
         m.depositCollateral{value: 1e27}(); // 1B HYPE
-        m.borrow(1_000_000e6); // 100% utilisation
+        m.borrow(500_000e6); // 100% utilisation
         vm.stopPrank();
         skip(82 * 365 days);
         usdc.mint(liquidator, 1e30);
