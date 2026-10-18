@@ -153,7 +153,7 @@ contract LendingMarket {
     }
 
     /// The HYPE price checked against the mark and the book (1e18 USD per HYPE).
-    function guardedPrice() public view returns (uint256) {
+    function guardedPrice() public view virtual returns (uint256) {
         HLPriceGuard.Asset memory a = HLPriceGuard.Asset(perpDex, perpIndex, szDecimals);
         HLPriceGuard.Bounds memory b = HLPriceGuard.Bounds(maxMarkOracleBps, maxMidOracleBps, maxSpreadBps, 0);
         return HLPriceGuard.read(a, b, HLPriceGuard.Ref(0, 0, 0));
@@ -161,7 +161,7 @@ contract LendingMarket {
 
     /// The price for liquidations: the higher of the oracle (0x807) and the mark (0x806), which
     /// Hyperliquid itself uses for margining and liquidations. 1e18 USD per HYPE.
-    function liquidationPrice() public view returns (uint256 px) {
+    function liquidationPrice() public view virtual returns (uint256 px) {
         uint32 perp = HLPrecompiles.perpIndex(perpDex, perpIndex);
         uint256 o = HLPrecompiles.oracle(perp, szDecimals);
         uint256 m = HLPrecompiles.mark(perp, szDecimals);
