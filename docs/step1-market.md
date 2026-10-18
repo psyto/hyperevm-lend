@@ -1,14 +1,16 @@
 # Step 1: a minimal market, and HYPE prices from Core
 
 HyperEVM testnet, 2026-10-18. `LendingMarket` at `0x00Aaeb42f8FaD9F8A1a79FaF0b9Fe76329Fb0C9e`, deployed and used by
-`0xBA378703f3a71e99F51393Cc3589EBcbBa26B40E`.
+`0xBA378703f3a71e99F51393Cc3589EBcbBa26B40E`. That deployment is the step-1 code, before the review
+fixes (docs/reviews/): liquidation there still used the bare oracle and interest was simple per
+call. The flow below is unaffected by those changes.
 
 ## What the market does
 One isolated market: supply USDC, deposit native HYPE as collateral, borrow USDC up to 60% of
 its value, repay, withdraw; above 75% anyone can liquidate up to half the debt and take that value
 in HYPE plus 5%. Interest follows HyperCore's own stablecoin curve (5% a year, plus 4.75 × the
 utilisation above 80%), 10% of it kept as a reserve that absorbs bad debt first. Everything settles
-on the EVM in one transaction; Core is only read.
+on the EVM in one transaction; Core is only read. (Current rules: README.)
 
 ## Prices on testnet (HYPE perp, index 135, szDecimals 2)
 | Read | Value |
