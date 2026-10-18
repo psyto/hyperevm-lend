@@ -18,8 +18,10 @@ interface IERC20 {
 /// leave the account (README).
 ///
 /// Prices: anything that adds risk (borrowing, taking collateral out) needs the oracle to pass
-/// hl-price-guard's checks against the mark and the book; liquidation needs only a nonzero
-/// oracle, so a real crash with a messy book cannot block it and leave bad debt growing.
+/// hl-price-guard's checks against the mark and the book. Liquidation uses the higher of the
+/// oracle and the mark, with no bounds: a borrower is liquidated only if unhealthy at both, and
+/// paid out at the higher one (review r1: the bare oracle alone let a liquidator take collateral
+/// the mark said was healthy). A real crash moves both, so it cannot block liquidation.
 contract LendingMarket {
     // ---------------------------------------------------------------- parameters
 
@@ -148,10 +150,14 @@ contract LendingMarket {
         return HLPriceGuard.read(a, b, HLPriceGuard.Ref(0, 0, 0));
     }
 
-    /// The bare oracle, for liquidations.
-    function oraclePrice() public view returns (uint256 px) {
-        px = HLPrecompiles.oracle(HLPrecompiles.perpIndex(perpDex, perpIndex), szDecimals);
-        if (px == 0) revert NoPrice();
+    /// The price for liquidations: the higher of the oracle (0x807) and the mark (0x806), which
+    /// Hyperliquid itself uses for margining and liquidations. 1e18 USD per HYPE.
+    function liquidationPrice() public view returns (uint256 px) {
+        uint32 perp = HLPrecompiles.perpIndex(perpDex, perpIndex);
+        uint256 o = HLPrecompiles.oracle(perp, szDecimals);
+        uint256 m = HLPrecompiles.mark(perp, szDecimals);
+        px = o > m ? o : m;
+        if (o == 0 || m == 0) revert NoPrice();
     }
 
     /// Debt over collateral value, in bps, at `price`. type(uint256).max with debt and no collateral.
@@ -234,23 +240,22 @@ contract LendingMarket {
     /// suppliers.
     function liquidate(address borrower, uint256 amount) external nonReentrant returns (uint256 seized) {
         _accrue();
-        uint256 price = oraclePrice();
+        uint256 price = liquidationPrice();
         uint256 ltv = ltvBps(borrower, price);
         if (ltv <= LIQ_LTV_BPS) revert Healthy(ltv);
 
         uint256 debt = debtOf(borrower);
         uint256 maxRepay = _divUp(debt * CLOSE_FACTOR_BPS, BPS);
         uint256 repayAmt = amount < maxRepay ? amount : maxRepay;
-        // HYPE for that much USDC, plus the bonus: usdc (6) -> USD (18) / price (18) -> HYPE (18)
-        seized = repayAmt * 1e12 * (BPS + LIQ_BONUS_BPS) / BPS * WAD / price;
         uint256 coll = collateral[borrower];
-        if (seized > coll) {
-            // not enough collateral for the bonus: take it all, repay only what it covers
-            seized = coll;
-            repayAmt = _divUp(coll * price / WAD * BPS / (BPS + LIQ_BONUS_BPS), 1e12);
+        bool takesAll = _seizeFor(repayAmt, price) >= coll;
+        if (takesAll) {
+            // not enough collateral for the bonus: repay only what all of it covers
+            repayAmt = coll * price / WAD * BPS / (BPS + LIQ_BONUS_BPS) / 1e12;
         }
-        if (repayAmt == 0) revert Zero();
-        repayAmt = _reduceDebt(borrower, repayAmt);
+        uint256 paid = _reduceDebt(borrower, repayAmt); // what the burned debt shares are worth
+        // all of it when it is short (rounding must not leave dust that blocks the write-off)
+        seized = takesAll ? coll : _seizeFor(paid, price);
         collateral[borrower] = coll - seized;
 
         uint256 badDebt;
@@ -261,9 +266,14 @@ contract LendingMarket {
             // the buffer takes the loss first, suppliers the rest
             reserves -= badDebt < reserves ? badDebt : reserves;
         }
-        _pull(repayAmt);
+        _pull(paid);
         _sendHype(msg.sender, seized);
-        emit Liquidate(msg.sender, borrower, repayAmt, seized, badDebt);
+        emit Liquidate(msg.sender, borrower, paid, seized, badDebt);
+    }
+
+    /// HYPE (18) for `usdcAmt` (6) at `price` (1e18 USD), plus the bonus.
+    function _seizeFor(uint256 usdcAmt, uint256 price) internal pure returns (uint256) {
+        return usdcAmt * 1e12 * (BPS + LIQ_BONUS_BPS) / BPS * WAD / price;
     }
 
     // ---------------------------------------------------------------- internals
@@ -273,20 +283,22 @@ contract LendingMarket {
         if (ltv > limitBps) revert Unhealthy(ltv);
     }
 
-    /// Reduce `borrower`'s debt by up to `amount` USDC; returns the USDC that covers.
+    /// Reduce `borrower`'s debt by up to `amount` USDC; returns the USDC that the burned debt
+    /// shares are worth, which is what the caller then pays (review r1: paying `amount` while
+    /// burning fewer shares took dust for nothing). Reverts if nothing would be burned.
     function _reduceDebt(address borrower, uint256 amount) internal returns (uint256 paid) {
         uint256 s = debtShares[borrower];
         uint256 debt = _mulUp(s, borrowIndex);
+        uint256 burn;
         if (amount >= debt) {
-            paid = debt;
-            debtShares[borrower] = 0;
-            totalDebtShares -= s;
+            (burn, paid) = (s, debt);
         } else {
-            uint256 burn = amount * WAD / borrowIndex; // round the shares burned down
-            paid = amount;
-            debtShares[borrower] = s - burn;
-            totalDebtShares -= burn;
+            burn = amount * WAD / borrowIndex; // round the shares burned down
+            paid = _mulUp(burn, borrowIndex); // <= amount
         }
+        if (burn == 0) revert Zero();
+        debtShares[borrower] = s - burn;
+        totalDebtShares -= burn;
     }
 
     function _accrue() internal {
@@ -302,10 +314,23 @@ contract LendingMarket {
         if (dt == 0 || totalDebtShares == 0) return (index, res);
         uint256 debt = _mulUp(totalDebtShares, index);
         uint256 rate = _rate(debt, cash());
-        uint256 growth = rate * dt / YEAR; // simple interest between accruals, compounding at each
-        uint256 interest = debt * growth / WAD;
-        index = index + index * growth / WAD;
+        // compounded per second, so the result does not depend on how often anyone calls
+        // (review r1: simple interest per call let anyone compound a borrower's debt faster)
+        uint256 factor = _rpow(WAD + rate / YEAR, dt);
+        uint256 newIndex = index * factor / WAD;
+        uint256 interest = totalDebtShares * (newIndex - index) / WAD;
+        index = newIndex;
         res = res + interest * RESERVE_FACTOR_BPS / BPS;
+    }
+
+    /// x^n for x in WAD, by squaring.
+    function _rpow(uint256 x, uint256 n) internal pure returns (uint256 z) {
+        z = WAD;
+        while (n > 0) {
+            if (n & 1 == 1) z = z * x / WAD;
+            x = x * x / WAD;
+            n >>= 1;
+        }
     }
 
     function _rate(uint256 debt, uint256 c) internal pure returns (uint256) {

@@ -166,9 +166,10 @@ contract LendingMarketTest is Test {
         market.borrow(240e6); // utilisation 24%: base rate
         assertEq(market.borrowRate(), 0.05e18);
         skip(365 days);
-        assertApproxEqAbs(market.debtOf(borrower), 252e6, 1); // 240 × 1.05
-        // suppliers: 1,000 + 12 interest − 1.2 reserve
-        assertApproxEqAbs(market.totalAssets(), 1_010.8e6, 2);
+        // compounded per second: 240 × e^0.05 = 252.305
+        assertApproxEqAbs(market.debtOf(borrower), 252_305_000, 5_000);
+        // suppliers: 1,000 + 12.305 interest − 10% reserve
+        assertApproxEqAbs(market.totalAssets(), 1_011_074_000, 5_000);
     }
 
     function test_rateJumpsAboveKink() public {
@@ -208,14 +209,16 @@ contract LendingMarketTest is Test {
         market.liquidate(borrower, 100e6);
     }
 
-    /// Liquidation uses the bare oracle: a messy book in a crash cannot block it.
+    /// Liquidation has no bounds: a messy book in a crash cannot block it. It prices at the
+    /// higher of the oracle and the mark.
     function test_liquidationIgnoresTheGuard() public {
         vm.prank(borrower);
         market.borrow(240e6);
-        _setQuote(30e4, 33e4, 25e4, 36e4); // mark 10% off, 36% wide
+        _setQuote(30e4, 31e4, 25e4, 36e4); // 36% wide book; liquidation price 31, LTV 77%
         vm.prank(liquidator);
-        market.liquidate(borrower, 60e6);
+        uint256 seized = market.liquidate(borrower, 60e6);
         assertEq(market.debtOf(borrower), 180e6);
+        assertEq(seized, uint256(60e6) * 1e12 * 10_500 / 10_000 * 1e18 / 31e18); // at 31, not 30
     }
 
     /// Underwater: collateral runs out, the rest is written off against the reserves, then suppliers.
@@ -230,5 +233,61 @@ contract LendingMarketTest is Test {
         assertEq(market.debtShares(borrower), 0);
         // repaid 100 / 1.05 = 95.238..., written off 240 − 95.24 = 144.76
         assertApproxEqAbs(market.totalAssets(), 1_000e6 - 144_761_904, 2);
+    }
+
+    // ------------------------------------------------------------ review r1
+
+    /// r1 high: the oracle alone falling cannot liquidate a borrower the mark says is healthy.
+    function test_r1_oracleAloneCannotLiquidate() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        _setQuote(30e4, 40e4, 39.98e4, 40.02e4);
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(LendingMarket.Healthy.selector, 6_000));
+        market.liquidate(borrower, type(uint256).max);
+    }
+
+    /// r1 high: how often anyone calls does not change what a borrower owes (the r1 PoC:
+    /// 100% utilisation, a dust supply every day for a year).
+    function test_r1_interestIndependentOfCallFrequency() public {
+        LendingMarket once = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        LendingMarket daily = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        LendingMarket[2] memory ms = [once, daily];
+        vm.deal(borrower, 200 ether);
+        for (uint256 i; i < 2; ++i) {
+            vm.prank(lender);
+            usdc.approve(address(ms[i]), type(uint256).max);
+            vm.prank(lender);
+            ms[i].supply(1_000e6);
+            vm.startPrank(borrower);
+            ms[i].depositCollateral{value: 50 ether}(); // $2,000
+            ms[i].borrow(1_000e6); // 100% utilisation: a constant 100% rate
+            vm.stopPrank();
+        }
+        address griefer = address(0x6E1F);
+        usdc.mint(griefer, 1_000);
+        vm.startPrank(griefer);
+        usdc.approve(address(daily), type(uint256).max);
+        for (uint256 i; i < 365; ++i) {
+            skip(1 days);
+            daily.supply(1);
+        }
+        vm.stopPrank();
+        uint256 a = once.debtOf(borrower);
+        uint256 b = daily.debtOf(borrower);
+        assertApproxEqRel(b, a, 1e12); // equal to 0.0001% (was +35% before the fix)
+        assertApproxEqRel(a, 2_718_281_828, 1e15); // 1,000 × e^1
+    }
+
+    /// r1 low: a repayment too small to burn a debt share is refused, not taken.
+    function test_r1_dustRepayRefused() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        skip(1);
+        uint256 before = usdc.balanceOf(borrower);
+        vm.prank(borrower);
+        vm.expectRevert(LendingMarket.Zero.selector);
+        market.repay(borrower, 1);
+        assertEq(usdc.balanceOf(borrower), before);
     }
 }
