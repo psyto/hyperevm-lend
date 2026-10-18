@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {IERC20, LendingMarket} from "../../src/LendingMarket.sol";
+import {TestnetPricedMarket} from "../../src/testing/TestnetPricedMarket.sol";
+import {MockUSDC} from "../LendingMarket.t.sol";
+
+/// @dev PoC: chain id 999 is HyperEVM mainnet. Despite the TESTNET ONLY notice, deployment and
+/// arbitrary deployer-controlled pricing both succeed there.
+contract TestnetPricedMarketMainnetPoC is Test {
+    function test_poc_testnetMarketDeploysAndHasSettablePriceOnMainnet() public {
+        vm.chainId(999);
+
+        TestnetPricedMarket market = new TestnetPricedMarket(IERC20(address(1)), 40e18);
+        market.setPrice(1);
+
+        assertEq(market.priceSetter(), address(this));
+        assertEq(market.guardedPrice(), 1);
+        assertEq(market.liquidationPrice(), 1);
+    }
+
+    function test_poc_zeroPriceIsGuardedDifferentlyFromLiquidation() public {
+        MockUSDC usdc = new MockUSDC();
+        TestnetPricedMarket market = new TestnetPricedMarket(IERC20(address(usdc)), 40e18);
+        usdc.mint(address(this), 10e6);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(10e6);
+
+        vm.deal(address(this), 1 ether);
+        market.depositCollateral{value: 0.2 ether}();
+        market.borrow(4.8e6);
+        market.setPrice(0);
+
+        // guardedPrice returns zero, so risk-increasing actions fail later as Unhealthy(max).
+        assertEq(market.guardedPrice(), 0);
+        vm.expectRevert(abi.encodeWithSelector(LendingMarket.Unhealthy.selector, type(uint256).max));
+        market.withdrawCollateral(0.01 ether);
+
+        // The liquidation route instead rejects the zero price explicitly.
+        vm.expectRevert(LendingMarket.NoPrice.selector);
+        market.liquidate(address(this), 1);
+    }
+}

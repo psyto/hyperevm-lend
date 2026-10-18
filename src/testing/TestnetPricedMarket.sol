@@ -12,10 +12,15 @@ contract TestnetPricedMarket is LendingMarket {
     uint256 public price; // 1e18 USD per HYPE
 
     error NotPriceSetter();
+    error NotTestnet(uint256 chainId);
+
+    uint256 internal constant HYPEREVM_TESTNET = 998;
 
     constructor(IERC20 usdc_, uint256 price_)
         LendingMarket(usdc_, 0, 0, 2, 0, 0, 0)
     {
+        // enforced, not only named (review r9): HyperEVM testnet is chain 998, mainnet 999
+        if (block.chainid != HYPEREVM_TESTNET) revert NotTestnet(block.chainid);
         priceSetter = msg.sender;
         price = price_;
     }
@@ -26,6 +31,7 @@ contract TestnetPricedMarket is LendingMarket {
     }
 
     function guardedPrice() public view override returns (uint256) {
+        if (price == 0) revert NoPrice(); // same as liquidationPrice (review r9)
         return price;
     }
 
