@@ -5,8 +5,9 @@ the books on the EVM and the prices from HyperCore.
 
 Status (2026-10-18): a learning project, not audited, not for real funds. The first version ran
 on HyperEVM testnet (supply, collateral, borrow, repay, withdraw: `docs/step1-market.md`). Codex
-has reviewed it adversarially seven times (3 findings, 2 low, 2 low, 1 medium and 1 low, then
-three single lows, all fixed); round 8 is a full overflow audit. Liquidation and interest are covered by tests but not yet exercised on testnet.
+has reviewed it adversarially eight times (rounds 1–7: 3 findings, then only lows apart from one
+medium, all fixed; round 8: a full arithmetic audit, 3 fixed and 3 accepted as limits below).
+Reviews stop there. Liquidation and interest are covered by tests but not yet exercised on testnet.
 
 ## How it works
 - **One isolated market.** Supply USDC; deposit native HYPE as collateral; borrow USDC up to 60%
@@ -29,6 +30,18 @@ three single lows, all fixed); round 8 is a full overflow audit. Liquidation and
   overflow. Rounding always favours the market: debt up, repayments
   down.
 
+## Known limits
+Only after decades at 100% utilisation (every USDC lent out; the rate is then 100% a year):
+- The borrow index itself overflows after about 136 years at a 100% rate (2,720 years at the 5%
+  base rate). The market cannot operate past that.
+- Before that: from about 55 years a 1T-USDC deposit buys less than one supply share, and from
+  about 83 years no repayment up to 1T USDC burns a debt share (liquidation of underwater
+  positions still works). Three total-loss-and-recapitalise cycles can also make `supply`
+  overflow. Fixing these needs share rebasing, which this learning project does not do
+  (docs/reviews/r8.md).
+- No timestamp is available for the oracle precompile, so an upstream oracle outage cannot be
+  detected on-chain.
+
 ## Why not HyperCore's own borrow/lend
 On HyperCore, borrowing happens only implicitly under portfolio margin (when an order needs more
 than the balance), a borrowed balance cannot be withdrawn or transferred, and CoreWriter exposes
@@ -45,7 +58,7 @@ Core, so nothing critical should wait for it.
 | `src/FullMath.sol` | Remco Bloemen's 512-bit `mulDiv` (MIT), as in Uniswap v3 |
 | `test/LendingMarket.t.sol` | 26 tests; HyperCore precompiles mocked at their real addresses |
 | `docs/step1-market.md` | the testnet run and the testnet HYPE prices |
-| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r7.md`) |
+| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r8.md`) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
 
 ## Things this taught (testnet, 2026-10-18)

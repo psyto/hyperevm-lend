@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {stdError} from "forge-std/StdError.sol";
+import {IERC20, LendingMarket} from "../../src/LendingMarket.sol";
+
+contract Round8USDC {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// @notice Reproductions for round 8's two checked-arithmetic freezes.
+contract Round8ArithmeticPoC is Test {
+    address constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address constant BBO = 0x000000000000000000000000000000000000080e;
+    uint32 constant PERP = 135;
+    uint256 constant WAD = 1e18;
+    uint256 constant SHARES = 1e36;
+    uint256 constant CASH = 1e18 - 1;
+    uint256 constant NEXT_SUPPLY = CASH - 1;
+    uint256 constant COLLATERAL = 1e11;
+
+    Round8USDC usdc;
+    LendingMarket market;
+    address constant LIQUIDATOR = address(0x1);
+
+    function setUp() public {
+        usdc = new Round8USDC();
+        market = new LendingMarket(IERC20(address(usdc)), 0, PERP, 6, 100, 100, 100);
+        _highPrice();
+        vm.prank(LIQUIDATOR);
+        usdc.approve(address(market), type(uint256).max);
+    }
+
+    /// At 130 years and 100% APY, the new index is still representable (about 2.9e74),
+    /// but interest * 1,000 is not. Every operation which calls _accrue is frozen.
+    function test_POC_reserveFactorProductFreezesAccrualBeforeIndexOverflow() public {
+        // LendingMarket storage slots: borrowIndex=2, totalDebtShares=3, lastAccrual=6.
+        vm.store(address(market), bytes32(uint256(2)), bytes32(WAD));
+        vm.store(address(market), bytes32(uint256(3)), bytes32(SHARES));
+        vm.store(address(market), bytes32(uint256(6)), bytes32(block.timestamp));
+        skip(130 * 365 days);
+
+        vm.expectRevert(stdError.arithmeticError);
+        market.totalDebt();
+        vm.expectRevert(stdError.arithmeticError);
+        market.supply(1);
+        vm.expectRevert(stdError.arithmeticError);
+        market.withdraw(1);
+        vm.expectRevert(stdError.arithmeticError);
+        market.repay(address(this), 1);
+        vm.expectRevert(stdError.arithmeticError);
+        market.withdrawCollateral(1);
+        vm.expectRevert(stdError.arithmeticError);
+        market.liquidate(address(this), 1);
+    }
+
+    /// The liquidation price is intentionally unguarded. A crash from a high entry price to raw
+    /// price 10 leaves this position worth one USDC base unit. At 128 years its LTV is larger
+    /// than uint256 even though both its debt and the borrow index are still representable.
+    function test_POC_ltvProductFreezesLiquidationBeforeIndexOverflow() public {
+        address borrower = address(0x30);
+        // LendingMarket storage slots: borrowIndex=2, totalDebtShares=3, debtShares=4,
+        // lastAccrual=6, collateral=7.
+        vm.store(address(market), bytes32(uint256(2)), bytes32(WAD));
+        vm.store(address(market), bytes32(uint256(3)), bytes32(SHARES));
+        vm.store(address(market), keccak256(abi.encode(borrower, uint256(4))), bytes32(SHARES));
+        vm.store(address(market), keccak256(abi.encode(borrower, uint256(7))), bytes32(COLLATERAL));
+        vm.store(address(market), bytes32(uint256(6)), bytes32(block.timestamp));
+        skip(128 * 365 days);
+
+        // szDecimals=6 makes raw 10 normalize to 1e19; 1e11 wei is worth one base unit.
+        vm.mockCall(ORACLE_PX, abi.encode(PERP), abi.encode(uint64(10)));
+        vm.mockCall(MARK_PX, abi.encode(PERP), abi.encode(uint64(10)));
+        vm.expectRevert(); // FullMath cannot represent debt * BPS / 1.
+        market.liquidate(borrower, 1);
+    }
+
+    /// A 1e18-base-unit initial supply mints about 1e24 shares. At 90 years and 100% APY,
+    /// shares * assets exceeds uint256 although the index, interest, and reserves still fit.
+    function test_POC_withdrawShareAssetProductOverflowsBeforeIndexOverflow() public {
+        address lender = address(0x40);
+        uint256 supplyShares = 1e24;
+        // LendingMarket storage slots: totalSupplyShares=0, supplyShares=1, borrowIndex=2,
+        // totalDebtShares=3, lastAccrual=6.
+        vm.store(address(market), bytes32(uint256(0)), bytes32(supplyShares));
+        vm.store(address(market), keccak256(abi.encode(lender, uint256(1))), bytes32(supplyShares));
+        vm.store(address(market), bytes32(uint256(2)), bytes32(WAD));
+        vm.store(address(market), bytes32(uint256(3)), bytes32(SHARES));
+        vm.store(address(market), bytes32(uint256(6)), bytes32(block.timestamp));
+        skip(90 * 365 days);
+
+        vm.prank(lender);
+        vm.expectRevert(stdError.arithmeticError);
+        market.withdraw(supplyShares);
+    }
+
+    /// At this scale a 1e18-base-unit (1T-USDC) deposit is worth less than one supply share,
+    /// so the floor rounds it to zero and permanently rejects every bounded-size new supply.
+    function test_POC_supplyRoundsToZeroBeforeIndexOverflow() public {
+        uint256 supplyShares = 1e24;
+        vm.store(address(market), bytes32(uint256(0)), bytes32(supplyShares));
+        vm.store(address(market), bytes32(uint256(2)), bytes32(WAD));
+        vm.store(address(market), bytes32(uint256(3)), bytes32(SHARES));
+        vm.store(address(market), bytes32(uint256(6)), bytes32(block.timestamp));
+        skip(60 * 365 days);
+
+        vm.expectRevert(LendingMarket.Zero.selector);
+        market.supply(1e18);
+    }
+
+    /// The 1e18 debt-share precision postpones, but does not eliminate, coarse repayment.
+    /// At 90 years and 100% APY, even the maximum bounded USDC payment burns zero shares.
+    function test_POC_repayRoundsToZeroBeforeIndexOverflow() public {
+        address borrower = address(0x50);
+        vm.store(address(market), bytes32(uint256(2)), bytes32(WAD));
+        vm.store(address(market), bytes32(uint256(3)), bytes32(SHARES));
+        vm.store(address(market), keccak256(abi.encode(borrower, uint256(4))), bytes32(SHARES));
+        vm.store(address(market), bytes32(uint256(6)), bytes32(block.timestamp));
+        skip(90 * 365 days);
+
+        vm.expectRevert(LendingMarket.Zero.selector);
+        market.repay(borrower, 1e18);
+    }
+
+    /// Repeated complete write-offs leave old shares outstanding. With only 1e18 total USDC
+    /// circulating, three recapitalization/loss cycles make amount * totalSupplyShares overflow.
+    function test_POC_recapitalizationShareProductFreezesSupply() public {
+        address lender0 = address(0x10);
+        address lender1 = address(0x11);
+        address lender2 = address(0x12);
+        address lender3 = address(0x13);
+        address borrower0 = address(0x20);
+        address borrower1 = address(0x21);
+        address borrower2 = address(0x22);
+
+        usdc.mint(lender0, CASH);
+        _supply(lender0, CASH);
+        _loseEverything(borrower0, lender1);
+        _supply(lender1, NEXT_SUPPLY);
+        _loseEverything(borrower1, lender2);
+        _supply(lender2, NEXT_SUPPLY);
+        _loseEverything(borrower2, lender3);
+
+        // The market has one USDC base unit and no debt, so this is precisely the share product.
+        assertEq(market.cash(), 1);
+        assertEq(market.totalAssets(), 1);
+        assertGt(market.totalSupplyShares(), type(uint256).max / NEXT_SUPPLY);
+        vm.prank(lender3);
+        usdc.approve(address(market), type(uint256).max);
+        vm.prank(lender3);
+        vm.expectRevert(stdError.arithmeticError);
+        market.supply(NEXT_SUPPLY);
+    }
+
+    function _supply(address lender, uint256 amount) internal {
+        vm.prank(lender);
+        usdc.approve(address(market), type(uint256).max);
+        vm.prank(lender);
+        market.supply(amount);
+    }
+
+    function _loseEverything(address borrower, address nextLender) internal {
+        vm.deal(borrower, COLLATERAL);
+        vm.prank(borrower);
+        market.depositCollateral{value: COLLATERAL}();
+        uint256 available = market.cash();
+        vm.prank(borrower);
+        market.borrow(available);
+
+        // Keep the total number of USDC base units at CASH: fund the next supplier and the
+        // one-unit short-liquidation payment from the just-borrowed cash.
+        vm.prank(borrower);
+        usdc.transfer(nextLender, NEXT_SUPPLY);
+        vm.prank(borrower);
+        usdc.transfer(LIQUIDATOR, 1);
+
+        _lowPrice();
+        vm.prank(LIQUIDATOR);
+        market.liquidate(borrower, type(uint256).max);
+        _highPrice();
+    }
+
+    function _highPrice() internal {
+        uint64 high = type(uint64).max;
+        vm.mockCall(ORACLE_PX, abi.encode(PERP), abi.encode(high));
+        vm.mockCall(MARK_PX, abi.encode(PERP), abi.encode(high));
+        vm.mockCall(BBO, abi.encode(PERP), abi.encode(high - 1, high));
+    }
+
+    function _lowPrice() internal {
+        vm.mockCall(ORACLE_PX, abi.encode(PERP), abi.encode(uint64(1)));
+        vm.mockCall(MARK_PX, abi.encode(PERP), abi.encode(uint64(1)));
+    }
+}

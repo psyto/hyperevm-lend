@@ -174,7 +174,8 @@ contract LendingMarket {
         uint256 debt = debtOf(who);
         if (debt == 0) return 0;
         uint256 value = _value(collateral[who], price);
-        return value == 0 ? type(uint256).max : FullMath.mulDivUp(debt, BPS, value);
+        if (value == 0 || debt / value >= type(uint256).max / BPS) return type(uint256).max; // saturate (review r8)
+        return FullMath.mulDivUp(debt, BPS, value);
     }
 
     // ---------------------------------------------------------------- suppliers
@@ -182,7 +183,7 @@ contract LendingMarket {
     function supply(uint256 amount) external nonReentrant returns (uint256 shares) {
         if (amount == 0) revert Zero();
         _accrue();
-        shares = amount * (totalSupplyShares + VIRTUAL_SHARES) / (totalAssets() + VIRTUAL_ASSETS);
+        shares = FullMath.mulDiv(amount, totalSupplyShares + VIRTUAL_SHARES, totalAssets() + VIRTUAL_ASSETS);
         if (shares == 0) revert Zero();
         totalSupplyShares += shares;
         supplyShares[msg.sender] += shares;
@@ -193,7 +194,7 @@ contract LendingMarket {
     function withdraw(uint256 shares) external nonReentrant returns (uint256 amount) {
         if (shares == 0) revert Zero();
         _accrue();
-        amount = shares * (totalAssets() + VIRTUAL_ASSETS) / (totalSupplyShares + VIRTUAL_SHARES);
+        amount = FullMath.mulDiv(shares, totalAssets() + VIRTUAL_ASSETS, totalSupplyShares + VIRTUAL_SHARES);
         uint256 c = cash();
         if (amount > c) revert NotEnoughCash(c);
         supplyShares[msg.sender] -= shares;
@@ -340,7 +341,7 @@ contract LendingMarket {
         uint256 newIndex = FullMath.mulDiv(index, factor, WAD);
         uint256 interest = FullMath.mulDiv(totalDebtShares, newIndex - index, SHARE_UNIT);
         index = newIndex;
-        res = res + interest * RESERVE_FACTOR_BPS / BPS;
+        res = res + FullMath.mulDiv(interest, RESERVE_FACTOR_BPS, BPS);
     }
 
     /// x^n for x in WAD, by squaring.
