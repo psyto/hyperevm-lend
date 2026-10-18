@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {LendingMarket, IERC20} from "../../src/LendingMarket.sol";
+
+contract Round5USDC {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// Narrow checks of the r4 short-collateral rewrite.
+contract Round5ShortPathPoC is Test {
+    address internal constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address internal constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address internal constant BBO = 0x000000000000000000000000000000000000080e;
+    uint32 internal constant HYPE_PERP = 135;
+
+    Round5USDC internal usdc;
+    LendingMarket internal market;
+    address internal lender = address(0x501);
+    address internal borrower = address(0x502);
+
+    function setUp() public {
+        usdc = new Round5USDC();
+        market = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        _quote(40e4);
+        usdc.mint(lender, 1_000e6);
+        vm.startPrank(lender);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(1_000e6);
+        vm.stopPrank();
+        vm.deal(borrower, 20 ether);
+        vm.prank(borrower);
+        market.depositCollateral{value: 10 ether}();
+        vm.prank(borrower);
+        usdc.approve(address(market), type(uint256).max);
+    }
+
+    function _quote(uint64 price4) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(HYPE_PERP), abi.encode(price4));
+        vm.mockCall(MARK_PX, abi.encode(HYPE_PERP), abi.encode(price4));
+        vm.mockCall(BBO, abi.encode(HYPE_PERP), abi.encode(price4 - 1, price4 + 1));
+    }
+
+    function test_boundaryAt190PctLtvTakesShortPathButOneTickAboveDoesNot() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+
+        // At $12.6000, the maximum 120-USDC close-factor repayment buys exactly 10 HYPE.
+        _quote(126000);
+        vm.prank(borrower);
+        uint256 seized = market.liquidate(borrower, type(uint256).max);
+        assertEq(seized, 10 ether);
+        assertEq(market.debtShares(borrower), 0);
+
+        // A fresh position at one price tick more is still >75% LTV, but takes the ordinary path.
+        setUp();
+        vm.prank(borrower);
+        market.borrow(240e6);
+        _quote(126001);
+        vm.prank(borrower);
+        seized = market.liquidate(borrower, type(uint256).max);
+        assertLt(seized, 10 ether);
+        assertEq(market.debtOf(borrower), 120e6);
+    }
+
+    function test_selfLiquidationPaysInBothNormalAndShortPaths() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+
+        // 80% LTV: the borrower pays 120 and only receives the 4.2 HYPE liquidation bonus.
+        _quote(30e4);
+        uint256 cashBefore = usdc.balanceOf(borrower);
+        vm.prank(borrower);
+        uint256 seized = market.liquidate(borrower, type(uint256).max);
+        assertEq(cashBefore - usdc.balanceOf(borrower), 120e6);
+        assertEq(seized, 4.2 ether);
+        assertEq(market.debtOf(borrower), 120e6);
+
+        // Deeply underwater: the borrower pays the all-collateral price, then the balance is bad debt.
+        setUp();
+        vm.prank(borrower);
+        market.borrow(240e6);
+        _quote(10e4);
+        cashBefore = usdc.balanceOf(borrower);
+        vm.prank(borrower);
+        seized = market.liquidate(borrower, type(uint256).max);
+        assertEq(cashBefore - usdc.balanceOf(borrower), 95_238_095);
+        assertEq(seized, 10 ether);
+        assertEq(market.debtShares(borrower), 0);
+    }
+
+    function test_reservesAbsorbShortPathBadDebtFirst() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        skip(365 days);
+        uint256 debt = market.debtOf(borrower);
+        uint256 assetsBefore = market.totalAssets();
+        // `totalAssets` accrues virtually; derive that virtual reserve before the liquidation
+        // writes it to storage.
+        uint256 reserveBefore = market.cash() + debt - assetsBefore;
+
+        _quote(10e4);
+        vm.prank(borrower);
+        market.liquidate(borrower, type(uint256).max);
+        uint256 paid = 95_238_095;
+        uint256 badDebt = debt - paid;
+        uint256 reserveDraw = badDebt < reserveBefore ? badDebt : reserveBefore;
+        assertEq(market.reserves(), reserveBefore - reserveDraw);
+        assertEq(assetsBefore - market.totalAssets(), badDebt - reserveDraw);
+    }
+
+    function test_POC_oneBaseUnitCollateralCanStillBeTakenForZeroPayment() public {
+        // Replace the standard position with one that can borrow 1 USDC base unit at $40.
+        Round5USDC tinyUsdc = new Round5USDC();
+        LendingMarket tiny = new LendingMarket(IERC20(address(tinyUsdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        tinyUsdc.mint(lender, 1_000e6);
+        vm.startPrank(lender);
+        tinyUsdc.approve(address(tiny), type(uint256).max);
+        tiny.supply(1_000e6);
+        vm.stopPrank();
+        _quote(40e4);
+        address b = address(0x503);
+        vm.deal(b, 0.01 ether);
+        vm.startPrank(b);
+        tiny.depositCollateral{value: 0.01 ether}(); // $0.40 initially
+        tiny.borrow(1); // one USDC base unit
+        tinyUsdc.approve(address(tiny), type(uint256).max);
+        vm.stopPrank();
+
+        // At $0.0001 the whole collateral is exactly one USDC base unit. Its 5% discounted
+        // repayment rounds down to zero, but a 1-unit request selects the short path.
+        _quote(1);
+        assertEq(tiny.ltvBps(b, 1e14), 10_000);
+        uint256 before = tinyUsdc.balanceOf(b);
+        vm.prank(b);
+        uint256 seized = tiny.liquidate(b, 1);
+        assertEq(tinyUsdc.balanceOf(b), before); // no USDC was pulled
+        assertEq(seized, 0.01 ether);
+        assertEq(tiny.debtShares(b), 0);
+        emit log_named_uint("collateral value (USDC base units)", 1);
+        emit log_named_uint("payment (USDC base units)", 0);
+        emit log_named_uint("bad debt (USDC base units)", 1);
+    }
+}

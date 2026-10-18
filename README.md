@@ -5,8 +5,8 @@ the books on the EVM and the prices from HyperCore.
 
 Status (2026-10-18): a learning project, not audited, not for real funds. The first version ran
 on HyperEVM testnet (supply, collateral, borrow, repay, withdraw: `docs/step1-market.md`). Codex
-has reviewed it adversarially four times (3 findings, 2 low, 2 low, then 1 medium and 1 low, all
-fixed); round 5 is in progress. Liquidation and interest are covered by tests but not yet exercised on testnet.
+has reviewed it adversarially five times (3 findings, 2 low, 2 low, 1 medium and 1 low, then 1
+low, all fixed); a narrow round 6 is checking the last fix. Liquidation and interest are covered by tests but not yet exercised on testnet.
 
 ## How it works
 - **One isolated market.** Supply USDC; deposit native HYPE as collateral; borrow USDC up to 60%
@@ -42,9 +42,9 @@ Core, so nothing critical should wait for it.
 |---|---|
 | `src/LendingMarket.sol` | the market |
 | `src/FullMath.sol` | Remco Bloemen's 512-bit `mulDiv` (MIT), as in Uniswap v3 |
-| `test/LendingMarket.t.sol` | 23 tests; HyperCore precompiles mocked at their real addresses |
+| `test/LendingMarket.t.sol` | 24 tests; HyperCore precompiles mocked at their real addresses |
 | `docs/step1-market.md` | the testnet run and the testnet HYPE prices |
-| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r4.md`) |
+| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r5.md`) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
 
 ## Things this taught (testnet, 2026-10-18)

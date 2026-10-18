@@ -261,7 +261,8 @@ contract LendingMarket {
             // Collateral short: the liquidator pays what all of it is worth (less the bonus) and
             // takes it all; the rest of the debt is written off. No debt shares are burned, so
             // however coarse a share has become, this cannot get stuck (reviews r3, r4).
-            paid = coll * price / WAD * BPS / (BPS + LIQ_BONUS_BPS) / 1e12;
+            // rounded up, so all the collateral is never handed over for nothing (review r5)
+            paid = FullMath.mulDivUp(coll, price * BPS, WAD * (BPS + LIQ_BONUS_BPS) * 1e12);
             if (paid > debt) paid = debt;
             seized = coll;
             badDebt = debt - paid;

@@ -1,0 +1,7 @@
+You are Codex, reviewing code Claude (another model) wrote. Do not defer to it. Round 5, narrow: the fixes for your round 4.
+
+Your round 4 (docs/reviews/r4.md, review-r4.out.md, PoCs in r4-poc.t.sol.txt) found 1 medium and 1 low. Claude's fix is the latest commit (`git show HEAD`): `liquidate` reverts on `amount == 0`; the r3 no-payment path and the DUST_USDC rule are removed; when `_seizeFor(repayAmt, price) >= collateral` the liquidator pays `coll * price / WAD * BPS / (BPS + bonus) / 1e12` (capped at the debt), takes all the collateral, and ALL the borrower's remaining debt shares are removed with `badDebt = debt - paid` (reserves first); otherwise `_reduceDebt` burns shares and the seize is `_seizeFor(paid)`. r4.md explains why this was rebuilt rather than patched.
+
+Review only this change. Write any PoC under test/poc/, run `forge test`, report numbers. Only add files under test/poc/. Check especially: can the short path be entered on purpose by a borrower or liquidator to pay less than fair value (e.g. a small `amount` so `_seizeFor(repayAmt)` vs collateral compares oddly, a position that is only just above 75%, a price where the bonus makes the comparison flip), can it write off debt that the collateral could have repaid, rounding of `paid` (down) vs the collateral handed over, the cap `paid > debt`, reserves accounting, and whether any position can still get stuck. Also self-liquidation in both paths.
+
+Output: findings with severity, PoC and result, root cause, fix. End with exactly one line: `VERDICT: APPROVE` or `VERDICT: CHANGES`.

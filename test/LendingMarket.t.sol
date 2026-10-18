@@ -399,4 +399,24 @@ contract LendingMarketTest is Test {
         assertEq(m.collateral(borrower), 0);
         assertEq(m.debtShares(borrower), 0);
     }
+
+    // ------------------------------------------------------------ review r5
+
+    /// r5 low: the short path never hands over collateral for a zero payment.
+    function test_r5_shortPathPaymentRoundsUp() public {
+        address b3 = address(0xB3);
+        vm.deal(b3, 1 ether);
+        vm.startPrank(b3);
+        market.depositCollateral{value: 0.025 ether}(); // $1.00 at 40
+        market.borrow(0.6e6);
+        vm.stopPrank();
+        _setPrice(1); // 0.0001 USD: collateral worth about 0.0000025 USDC
+        usdc.mint(b3, 1e6);
+        vm.startPrank(b3);
+        usdc.approve(address(market), type(uint256).max);
+        uint256 before = usdc.balanceOf(b3);
+        market.liquidate(b3, type(uint256).max);
+        vm.stopPrank();
+        assertGt(before - usdc.balanceOf(b3), 0, "paid something for the collateral");
+    }
 }
