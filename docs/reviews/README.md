@@ -14,3 +14,4 @@ fix), and `rN.md` (the findings, fixes and regression tests).
 | 6 | [r6.md](r6.md) |
 | 7 | [r7.md](r7.md) |
 | 8 | [r8.md](r8.md) |
+| 9 | [r9.md](r9.md) |

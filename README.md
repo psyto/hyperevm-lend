@@ -6,9 +6,12 @@ the books on the EVM and the prices from HyperCore.
 Status (2026-10-19): a learning project, not audited, not for real funds.
 - The first version ran on HyperEVM testnet: supply, collateral, borrow, repay, withdraw
   (`docs/step1-market.md`). That deployment predates the review fixes.
-- Codex reviewed it adversarially eight times; every finding was fixed or, for three that need
+- Codex reviewed it adversarially nine times; every finding was fixed or, for three that need
   half a century at 100% utilisation, accepted as a documented limit. Reviews stop there.
-- Liquidation and interest are covered by tests but not yet exercised on testnet.
+- Interest and both liquidation paths ran on testnet with a testnet-only market whose price is
+  set by hand (`docs/step2-liquidation-testnet.md`): interest matched e^(rt) to a base unit, the
+  short path wrote off the rest of the debt with the reserve taking the loss first, and the
+  supplier then withdrew exactly what was left.
 
 ## How it works
 - **One isolated market.** Supply USDC; deposit native HYPE as collateral; borrow USDC up to 60%
@@ -65,9 +68,11 @@ Core, so nothing critical should wait for it.
 | Path | What |
 |---|---|
 | `src/LendingMarket.sol` | the market |
+| `src/testing/TestnetPricedMarket.sol` | testnet only (refuses any chain but 998): the market with a hand-set price, to exercise liquidation |
 | `src/FullMath.sol` | Remco Bloemen's 512-bit `mulDiv` (MIT), as in Uniswap v3 |
-| `test/LendingMarket.t.sol` | 26 tests; HyperCore precompiles mocked at their real addresses |
-| `docs/step1-market.md` | the testnet run and the testnet HYPE prices |
+| `test/` | 28 tests; HyperCore precompiles mocked at their real addresses |
+| `docs/step1-market.md` | the first testnet run and the testnet HYPE prices |
+| `docs/step2-liquidation-testnet.md` | interest and both liquidation paths on testnet |
 | `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r8.md`) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
 
@@ -92,10 +97,9 @@ Codex, adversarial, a failing test for every finding (`docs/reviews/`).
 | 6 | r5 fix | 1 low | `szDecimals <= 6` |
 | 7 | r6 fix | 1 low | paths chosen on USDC amounts; `mulDiv` for every product with the debt |
 | 8 | full arithmetic audit | 6 low | 3 fixed, 3 accepted (Known limits) |
+| 9 | the testnet-only priced market | 1 low, 1 info | refuses any chain but testnet; zero price reverts in both reads |
 
 ## Next
-- Exercise liquidation and interest on testnet (needs a test market with its own price source,
-  since the testnet oracle cannot be moved).
 - Optionally lend idle USDC into HyperCore's borrow/lend (blocked on testnet: USDC sent EVM → Core
   does not reach a contract's Core account).
 
