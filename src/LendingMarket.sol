@@ -42,7 +42,6 @@ contract LendingMarket {
     uint256 public constant LIQ_BONUS_BPS = 500; // liquidator gets 5% more HYPE than it repays
     uint256 public constant CLOSE_FACTOR_BPS = 5_000; // at most half the debt per liquidation
     uint256 public constant RESERVE_FACTOR_BPS = 1_000; // 10% of interest kept as a buffer
-    uint256 public constant DUST_USDC = 1e6; // collateral worth less than 1 USDC is not left behind
     /// Rate model, yearly, in WAD: BASE until KINK utilisation, then up by JUMP to 100%.
     /// Same shape as HyperCore's stablecoin rate (0.05 + 4.75 * max(0, u - 0.8)).
     uint256 public constant BASE_RATE = 0.05e18;
@@ -241,10 +240,11 @@ contract LendingMarket {
     // ---------------------------------------------------------------- liquidation
 
     /// Repay up to `amount` (and at most `CLOSE_FACTOR_BPS` of the debt) of a borrower above
-    /// `LIQ_LTV_BPS`, and take that value in HYPE plus `LIQ_BONUS_BPS`. If that empties the
-    /// collateral and debt is left, the rest is written off: against the reserves first, then
-    /// suppliers.
+    /// `LIQ_LTV_BPS`, and take that value in HYPE plus `LIQ_BONUS_BPS`. If the collateral cannot
+    /// cover that, the liquidator pays what all of it is worth and takes it, and the rest of the
+    /// debt is written off: against the reserves first, then suppliers.
     function liquidate(address borrower, uint256 amount) external nonReentrant returns (uint256 seized) {
+        if (amount == 0) revert Zero(); // review r4: a zero amount reached the no-payment path
         _accrue();
         uint256 price = liquidationPrice();
         uint256 ltv = ltvBps(borrower, price);
@@ -254,33 +254,30 @@ contract LendingMarket {
         uint256 maxRepay = _divUp(debt * CLOSE_FACTOR_BPS, BPS);
         uint256 repayAmt = amount < maxRepay ? amount : maxRepay;
         uint256 coll = collateral[borrower];
-        if (_seizeFor(repayAmt, price) >= coll) {
-            // not enough collateral for the bonus: repay only what all of it covers
-            repayAmt = coll * price / WAD * BPS / (BPS + LIQ_BONUS_BPS) / 1e12;
-        }
-        uint256 paid;
-        if (repayAmt == 0 && _value(coll, price) < DUST_USDC) {
-            // the collateral is worth less than DUST_USDC and buys nothing: take it and write the
-            // debt off below, rather than leave the position stuck (review r3)
-            seized = coll;
-        } else {
-            paid = _reduceDebt(borrower, repayAmt); // what the burned debt shares are worth
-            seized = _seizeFor(paid, price);
-        }
-        // Decided on what was actually paid (review r2). What is left after the seize: all of it
-        // goes when it is worth under DUST_USDC, so rounding cannot leave dust that blocks the
-        // bad-debt write-off, and the liquidator can never get more than that for free.
-        if (seized >= coll || _value(coll - seized, price) < DUST_USDC) seized = coll;
-        collateral[borrower] = coll - seized;
 
+        uint256 paid;
         uint256 badDebt;
-        if (collateral[borrower] == 0 && debtShares[borrower] != 0) {
-            badDebt = _mulUp(debtShares[borrower], borrowIndex);
+        if (_seizeFor(repayAmt, price) >= coll) {
+            // Collateral short: the liquidator pays what all of it is worth (less the bonus) and
+            // takes it all; the rest of the debt is written off. No debt shares are burned, so
+            // however coarse a share has become, this cannot get stuck (reviews r3, r4).
+            paid = coll * price / WAD * BPS / (BPS + LIQ_BONUS_BPS) / 1e12;
+            if (paid > debt) paid = debt;
+            seized = coll;
+            badDebt = debt - paid;
             totalDebtShares -= debtShares[borrower];
             debtShares[borrower] = 0;
-            // the buffer takes the loss first, suppliers the rest
-            reserves -= badDebt < reserves ? badDebt : reserves;
+        } else {
+            // Enough collateral: seize exactly what the burned debt shares are worth. Whatever is
+            // left stays the borrower's (no "dust" rule: giving it away with the debt written off
+            // let a borrower self-liquidate small positions for profit, review r4).
+            paid = _reduceDebt(borrower, repayAmt);
+            seized = _seizeFor(paid, price);
         }
+        collateral[borrower] = coll - seized;
+        // the buffer takes the loss first, suppliers the rest
+        reserves -= badDebt < reserves ? badDebt : reserves;
+
         if (paid > 0) _pull(paid);
         _sendHype(msg.sender, seized);
         emit Liquidate(msg.sender, borrower, paid, seized, badDebt);

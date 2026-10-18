@@ -5,15 +5,16 @@ the books on the EVM and the prices from HyperCore.
 
 Status (2026-10-18): a learning project, not audited, not for real funds. The first version ran
 on HyperEVM testnet (supply, collateral, borrow, repay, withdraw: `docs/step1-market.md`). Codex
-has reviewed it adversarially three times (3 findings, then 2 low, then 2 low, all fixed); round 4
-is in progress. Liquidation and interest are covered by tests but not yet exercised on testnet.
+has reviewed it adversarially four times (3 findings, 2 low, 2 low, then 1 medium and 1 low, all
+fixed); round 5 is in progress. Liquidation and interest are covered by tests but not yet exercised on testnet.
 
 ## How it works
 - **One isolated market.** Supply USDC; deposit native HYPE as collateral; borrow USDC up to 60%
   of its value; repay; withdraw.
 - **Liquidation.** Above 75% anyone can repay up to half the debt and take that value in HYPE plus
-  5%. If the collateral cannot cover it, all of it goes and the rest of the debt is written off:
-  against the reserve first, then suppliers. Collateral worth under 1 USDC is never left behind.
+  5%. If the collateral cannot cover that, the liquidator pays what all of it is worth (less the
+  bonus) and takes it all, and the rest of the debt is written off: against the reserve first,
+  then suppliers. That path burns no debt shares, so no amount of accrued interest can block it.
 - **Interest.** HyperCore's own stablecoin curve: 5% a year, plus 4.75 × utilisation above 80%,
   compounded per second, so how often anyone calls does not change what a borrower owes. 10% of
   it is kept as the reserve.
@@ -41,9 +42,9 @@ Core, so nothing critical should wait for it.
 |---|---|
 | `src/LendingMarket.sol` | the market |
 | `src/FullMath.sol` | Remco Bloemen's 512-bit `mulDiv` (MIT), as in Uniswap v3 |
-| `test/LendingMarket.t.sol` | 20 tests; HyperCore precompiles mocked at their real addresses |
+| `test/LendingMarket.t.sol` | 23 tests; HyperCore precompiles mocked at their real addresses |
 | `docs/step1-market.md` | the testnet run and the testnet HYPE prices |
-| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r3.md`) |
+| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r4.md`) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
 
 ## Things this taught (testnet, 2026-10-18)

@@ -344,4 +344,59 @@ contract LendingMarketTest is Test {
         skip(3 * 2 ** 30);
         market.debtOf(borrower);
     }
+
+    // ------------------------------------------------------------ review r4
+
+    function test_r4_zeroAmountLiquidationRefused() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        _setPrice(1);
+        vm.prank(liquidator);
+        vm.expectRevert(LendingMarket.Zero.selector);
+        market.liquidate(borrower, 0);
+    }
+
+    /// r4 medium: a borrower cannot self-liquidate a small position to keep the loan and get the
+    /// collateral back (the old "dust" rule).
+    function test_r4_selfLiquidationIsNotFree() public {
+        address b2 = address(0xB2);
+        vm.deal(b2, 1 ether);
+        vm.startPrank(b2);
+        market.depositCollateral{value: 0.025 ether}(); // $1.00 at 40
+        market.borrow(0.6e6);
+        vm.stopPrank();
+        _setPrice(30e4); // $0.75 collateral, 80% LTV
+        usdc.mint(b2, 1);
+        vm.startPrank(b2);
+        usdc.approve(address(market), type(uint256).max);
+        uint256 seized = market.liquidate(b2, 1); // repay 1 unit
+        vm.stopPrank();
+        // took only what 1 unit buys, and the debt is still owed
+        assertLt(seized, 1e12);
+        assertGt(market.debtOf(b2), 0.599e6);
+        assertGt(market.collateral(b2), 0.0249 ether);
+    }
+
+    /// r4 low: after any amount of interest, an underwater position can always be closed:
+    /// the short-collateral path burns no debt shares.
+    function test_r4_shortPathNeverStuckAfterLongAccrual() public {
+        LendingMarket m = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        vm.prank(lender);
+        usdc.approve(address(m), type(uint256).max);
+        vm.prank(lender);
+        m.supply(1_000e6);
+        vm.startPrank(borrower);
+        m.depositCollateral{value: 50 ether}();
+        m.borrow(1_000e6); // 100% utilisation
+        vm.stopPrank();
+        skip(56 * 365 days);
+        _setPrice(0.02e4); // 50 HYPE worth 1.00 USDC
+        vm.startPrank(liquidator);
+        usdc.approve(address(m), type(uint256).max);
+        uint256 seized = m.liquidate(borrower, type(uint256).max);
+        vm.stopPrank();
+        assertEq(seized, 50 ether);
+        assertEq(m.collateral(borrower), 0);
+        assertEq(m.debtShares(borrower), 0);
+    }
 }

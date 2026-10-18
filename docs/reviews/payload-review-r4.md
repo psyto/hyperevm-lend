@@ -1,0 +1,7 @@
+You are Codex, reviewing code Claude (another model) wrote. Do not defer to it. Round 4, narrow: the fixes for your round 3.
+
+Your round 3 (docs/reviews/r3.md, review-r3.out.md, PoCs in r3-poc.t.sol.txt) found 2 low issues. Claude's fix is the latest commit (`git show HEAD`): debt shares are now 1e18 times finer (SHARE_SCALE; SHARE_UNIT = WAD * SHARE_SCALE) and every share/index conversion, the interest and `_rpow` go through `FullMath.mulDiv`/`mulDivUp` (src/FullMath.sol, Remco Bloemen's mulDiv); in `liquidate`, collateral worth under DUST_USDC whose repay rounds to 0 is taken with no payment and the debt written off. Your two finding PoCs no longer revert.
+
+Review only this change. Write any PoC under test/poc/, run `forge test`, report numbers. Only add files under test/poc/. Check: FullMath is a faithful copy (compare with Uniswap v3 FullMath / the original) and mulDivUp is correct; rounding directions after the rescale (borrow up, burn down, value up) still favour the market; overflow headroom of debt shares (amount * 1e36 / index) for large borrows; the zero-payment write-off cannot be used on a position whose collateral is worth >= DUST_USDC or by a borrower to escape debt cheaply (e.g. self-liquidation after pushing the price, or splitting collateral); `paid == 0` paths; anything else in the diff.
+
+Output: findings with severity, PoC and result, root cause, fix. End with exactly one line: `VERDICT: APPROVE` or `VERDICT: CHANGES`.
