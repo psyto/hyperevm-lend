@@ -73,7 +73,7 @@ Core, so nothing critical should wait for it.
 | `test/` | 28 tests; HyperCore precompiles mocked at their real addresses |
 | `docs/step1-market.md` | the first testnet run and the testnet HYPE prices |
 | `docs/step2-liquidation-testnet.md` | interest and both liquidation paths on testnet |
-| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r8.md`) |
+| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r9.md`) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
 
 ## Things this taught (testnet, 2026-10-18)

@@ -4,6 +4,10 @@ Each round: `payload-review-rN.md` (what Codex was asked), `review-rN.out.md` (i
 `rN-poc.t.sol.txt` (its proof-of-concept tests, kept as text: they assert the behaviour before the
 fix), and `rN.md` (the findings, fixes and regression tests).
 
+The `review-rN.out.md` files are Codex's answers verbatim. Their `forge test` counts include the
+PoCs Codex added in its own worktree, which are only kept here as `.txt`, so they are higher than
+the committed suite (28 tests).
+
 | Round | Record |
 |---|---|
 | 1 | [r1.md](r1.md) |
