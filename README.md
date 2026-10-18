@@ -2,7 +2,18 @@
 
 Learning HyperEVM by building a lending market (HypurrFi-style): borrow USDC against HYPE.
 
-Status (2026-10-18): starting. A learning project, not audited, not for real funds.
+Status (2026-10-18): step 1 done. A minimal market (`src/LendingMarket.sol`, 13 tests) ran on
+testnet: supply, collateral, borrow, repay, withdraw (`docs/step1-market.md`). A learning
+project, not audited, not for real funds.
+
+## The market
+- Supply USDC; deposit native HYPE as collateral; borrow USDC up to 60% of its value.
+- Above 75% anyone can liquidate up to half the debt and take that value in HYPE plus 5%.
+- Interest: HyperCore's own stablecoin curve, 5% a year plus 4.75 × utilisation above 80%;
+  10% kept as a reserve that absorbs bad debt before suppliers do.
+- HYPE price: the perp oracle (0x807). Borrowing and taking collateral out need it to pass
+  hl-price-guard's checks against the mark and the book; liquidation needs only a nonzero oracle,
+  so a crash with a messy book cannot block it.
 
 Why the lending runs on the EVM and not on HyperCore's own borrow/lend: on HyperCore, borrowing
 happens only implicitly under portfolio margin (when an order needs more than the balance), a
