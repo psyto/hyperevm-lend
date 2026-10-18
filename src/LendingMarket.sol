@@ -87,6 +87,7 @@ contract LendingMarket {
     error Healthy(uint256 ltvBps);
     error NoPrice();
     error TransferFailed();
+    error BadConfig();
 
     constructor(
         IERC20 usdc_,
@@ -97,6 +98,9 @@ contract LendingMarket {
         uint16 maxMidOracleBps_,
         uint16 maxSpreadBps_
     ) {
+        // perp prices have 6 - szDecimals decimals, so szDecimals is at most 6; bounding it also
+        // keeps every price product (e.g. price * BPS) far from overflow (review r6)
+        if (szDecimals_ > 6) revert BadConfig();
         usdc = usdc_;
         perpDex = perpDex_;
         perpIndex = perpIndex_;

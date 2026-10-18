@@ -419,4 +419,13 @@ contract LendingMarketTest is Test {
         vm.stopPrank();
         assertGt(before - usdc.balanceOf(b3), 0, "paid something for the collateral");
     }
+
+    // ------------------------------------------------------------ review r6
+
+    /// r6 low: a szDecimals no Hyperliquid perp can have is refused at deployment.
+    function test_r6_szDecimalsBounded() public {
+        vm.expectRevert(LendingMarket.BadConfig.selector);
+        new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 7, 100, 100, 100);
+        new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 6, 100, 100, 100);
+    }
 }
