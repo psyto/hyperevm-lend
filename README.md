@@ -3,11 +3,12 @@
 Learning HyperEVM by building a lending market (HypurrFi-style): borrow USDC against HYPE, with
 the books on the EVM and the prices from HyperCore.
 
-Status (2026-10-18): a learning project, not audited, not for real funds. The first version ran
-on HyperEVM testnet (supply, collateral, borrow, repay, withdraw: `docs/step1-market.md`). Codex
-has reviewed it adversarially eight times (rounds 1–7: 3 findings, then only lows apart from one
-medium, all fixed; round 8: a full arithmetic audit, 3 fixed and 3 accepted as limits below).
-Reviews stop there. Liquidation and interest are covered by tests but not yet exercised on testnet.
+Status (2026-10-19): a learning project, not audited, not for real funds.
+- The first version ran on HyperEVM testnet: supply, collateral, borrow, repay, withdraw
+  (`docs/step1-market.md`). That deployment predates the review fixes.
+- Codex reviewed it adversarially eight times; every finding was fixed or, for three that need
+  half a century at 100% utilisation, accepted as a documented limit. Reviews stop there.
+- Liquidation and interest are covered by tests but not yet exercised on testnet.
 
 ## How it works
 - **One isolated market.** Supply USDC; deposit native HYPE as collateral; borrow USDC up to 60%
@@ -27,8 +28,17 @@ Reviews stop there. Liquidation and interest are covered by tests but not yet ex
 - **Rounding.** Supplier shares carry virtual shares against inflation; debt shares are counted
   1e18 times finer than the index, and all share/index maths and every product with the debt use
   a 512-bit `mulDiv`, so decades of interest cannot make one share coarse or a liquidation
-  overflow. Rounding always favours the market: debt up, repayments
-  down.
+  overflow. Rounding always favours the market: debt up, repayments down.
+
+| Parameter | Value |
+|---|---|
+| Max borrow (LTV) | 60% |
+| Liquidatable above | 75% |
+| Liquidation bonus | 5% |
+| Close factor | 50% of the debt per liquidation |
+| Interest | 5% a year, + 4.75 × utilisation above 80%, compounded per second |
+| Reserve factor | 10% of interest |
+| Price checks for borrow / withdraw collateral | constructor bounds on mark/oracle, mid/oracle, spread (0 = off; testnet uses 0) |
 
 ## Known limits
 Only after decades at 100% utilisation (every USDC lent out; the rate is then 100% a year):
@@ -68,6 +78,26 @@ Core, so nothing critical should wait for it.
 - Core's borrow/lend values HYPE at the mark (51.80), not the oracle (40.48).
 - The testnet HYPE perp is not a usable price: the mark was 28% off the oracle and the book 38%
   wide, so the testnet deployment runs with the price bounds off. Mainnet HYPE perp: index 159.
+
+## Reviews
+Codex, adversarial, a failing test for every finding (`docs/reviews/`).
+
+| Round | Scope | Findings | Outcome |
+|---|---|---|---|
+| 1 | whole market | 2 high, 1 low | liquidation at max(oracle, mark); per-second compounding; no dust repay |
+| 2 | r1 fixes | 2 low | seize on what was paid; `_rpow` overflow |
+| 3 | r2 fixes | 2 low | finer debt shares, 512-bit `mulDiv` |
+| 4 | r3 fixes | 1 medium, 1 low | short-collateral liquidation rebuilt without share burns; zero amount refused |
+| 5 | rebuilt path | 1 low | short-path payment rounded up |
+| 6 | r5 fix | 1 low | `szDecimals <= 6` |
+| 7 | r6 fix | 1 low | paths chosen on USDC amounts; `mulDiv` for every product with the debt |
+| 8 | full arithmetic audit | 6 low | 3 fixed, 3 accepted (Known limits) |
+
+## Next
+- Exercise liquidation and interest on testnet (needs a test market with its own price source,
+  since the testnet oracle cannot be moved).
+- Optionally lend idle USDC into HyperCore's borrow/lend (blocked on testnet: USDC sent EVM → Core
+  does not reach a contract's Core account).
 
 ## Run
 ```
