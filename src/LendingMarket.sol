@@ -37,6 +37,7 @@ contract LendingMarket {
     uint256 public constant LIQ_BONUS_BPS = 500; // liquidator gets 5% more HYPE than it repays
     uint256 public constant CLOSE_FACTOR_BPS = 5_000; // at most half the debt per liquidation
     uint256 public constant RESERVE_FACTOR_BPS = 1_000; // 10% of interest kept as a buffer
+    uint256 public constant DUST_USDC = 1e6; // collateral worth less than 1 USDC is not left behind
     /// Rate model, yearly, in WAD: BASE until KINK utilisation, then up by JUMP to 100%.
     /// Same shape as HyperCore's stablecoin rate (0.05 + 4.75 * max(0, u - 0.8)).
     uint256 public constant BASE_RATE = 0.05e18;
@@ -248,14 +249,16 @@ contract LendingMarket {
         uint256 maxRepay = _divUp(debt * CLOSE_FACTOR_BPS, BPS);
         uint256 repayAmt = amount < maxRepay ? amount : maxRepay;
         uint256 coll = collateral[borrower];
-        bool takesAll = _seizeFor(repayAmt, price) >= coll;
-        if (takesAll) {
+        if (_seizeFor(repayAmt, price) >= coll) {
             // not enough collateral for the bonus: repay only what all of it covers
             repayAmt = coll * price / WAD * BPS / (BPS + LIQ_BONUS_BPS) / 1e12;
         }
         uint256 paid = _reduceDebt(borrower, repayAmt); // what the burned debt shares are worth
-        // all of it when it is short (rounding must not leave dust that blocks the write-off)
-        seized = takesAll ? coll : _seizeFor(paid, price);
+        seized = _seizeFor(paid, price);
+        // Decided on what was actually paid (review r2). What is left after the seize: all of it
+        // goes when it is worth under DUST_USDC, so rounding cannot leave dust that blocks the
+        // bad-debt write-off, and the liquidator can never get more than that for free.
+        if (seized >= coll || _value(coll - seized, price) < DUST_USDC) seized = coll;
         collateral[borrower] = coll - seized;
 
         uint256 badDebt;
@@ -328,8 +331,8 @@ contract LendingMarket {
         z = WAD;
         while (n > 0) {
             if (n & 1 == 1) z = z * x / WAD;
-            x = x * x / WAD;
             n >>= 1;
+            if (n > 0) x = x * x / WAD; // no square after the last bit (review r2: it overflowed)
         }
     }
 

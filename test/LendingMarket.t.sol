@@ -290,4 +290,31 @@ contract LendingMarketTest is Test {
         market.repay(borrower, 1);
         assertEq(usdc.balanceOf(borrower), before);
     }
+
+    // ------------------------------------------------------------ review r2
+
+    /// r2 low: after decades of interest one debt share is worth a lot, and a short liquidation
+    /// must not hand over more collateral than the rounded payment buys.
+    function test_r2_shortLiquidationSeizesOnlyWhatWasPaid() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        skip(28 * 365 days);
+        _setPrice(1e4); // collateral worth 10 USDC against a huge debt
+        uint256 coll = market.collateral(borrower);
+        vm.prank(liquidator);
+        uint256 seized = market.liquidate(borrower, type(uint256).max);
+        // never more HYPE than the payment buys at the bonus, plus at most 1 USDC of dust
+        uint256 paidUsdc = 1_000_000e6 - usdc.balanceOf(liquidator);
+        uint256 bought = paidUsdc * 1e12 * 10_500 / 10_000 * 1e18 / 1e18;
+        assertLe(seized, bought + 1 ether); // 1 HYPE = 1 USDC here
+        assertLe(seized, coll);
+    }
+
+    /// r2 low: a market left alone for 68 years can still be read.
+    function test_r2_rpowNoOverflowOnLongIdle() public {
+        vm.prank(borrower);
+        market.borrow(240e6);
+        skip(2 ** 31);
+        market.debtOf(borrower);
+    }
 }
