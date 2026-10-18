@@ -428,4 +428,32 @@ contract LendingMarketTest is Test {
         new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 7, 100, 100, 100);
         new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 6, 100, 100, 100);
     }
+
+    // ------------------------------------------------------------ review r7
+
+    /// r7 low: after 82 years at 100% utilisation (debt ~4e47 base units), with 1B HYPE of
+    /// collateral, liquidation still completes: the paths are chosen on USDC amounts and every
+    /// product with the debt goes through mulDiv.
+    function test_r7_liquidationAfter82Years() public {
+        LendingMarket m = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 100, 100, 100);
+        vm.prank(lender);
+        usdc.approve(address(m), type(uint256).max);
+        vm.prank(lender);
+        m.supply(1_000_000e6);
+        address whale = address(0xB16);
+        vm.deal(whale, 1e27);
+        vm.startPrank(whale);
+        m.depositCollateral{value: 1e27}(); // 1B HYPE
+        m.borrow(1_000_000e6); // 100% utilisation
+        vm.stopPrank();
+        skip(82 * 365 days);
+        usdc.mint(liquidator, 1e30);
+        vm.startPrank(liquidator);
+        usdc.approve(address(m), type(uint256).max);
+        uint256 seized = m.liquidate(whale, type(uint256).max);
+        vm.stopPrank();
+        assertEq(seized, 1e27);
+        assertEq(m.collateral(whale), 0);
+        assertEq(m.debtShares(whale), 0);
+    }
 }

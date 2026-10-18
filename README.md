@@ -5,8 +5,8 @@ the books on the EVM and the prices from HyperCore.
 
 Status (2026-10-18): a learning project, not audited, not for real funds. The first version ran
 on HyperEVM testnet (supply, collateral, borrow, repay, withdraw: `docs/step1-market.md`). Codex
-has reviewed it adversarially six times (3 findings, 2 low, 2 low, 1 medium and 1 low, 1 low,
-then 1 low, all fixed); a narrow round 7 is checking the last fix. Liquidation and interest are covered by tests but not yet exercised on testnet.
+has reviewed it adversarially seven times (3 findings, 2 low, 2 low, 1 medium and 1 low, then
+three single lows, all fixed); round 8 is a full overflow audit. Liquidation and interest are covered by tests but not yet exercised on testnet.
 
 ## How it works
 - **One isolated market.** Supply USDC; deposit native HYPE as collateral; borrow USDC up to 60%
@@ -24,8 +24,9 @@ then 1 low, all fixed); a narrow round 7 is checking the last fix. Liquidation a
   alone cannot liquidate anyone, and a real crash, which moves both, cannot be blocked by a messy
   book.
 - **Rounding.** Supplier shares carry virtual shares against inflation; debt shares are counted
-  1e18 times finer than the index and all share/index maths uses a 512-bit `mulDiv`, so decades of
-  interest cannot make one share coarse. Rounding always favours the market: debt up, repayments
+  1e18 times finer than the index, and all share/index maths and every product with the debt use
+  a 512-bit `mulDiv`, so decades of interest cannot make one share coarse or a liquidation
+  overflow. Rounding always favours the market: debt up, repayments
   down.
 
 ## Why not HyperCore's own borrow/lend
@@ -42,9 +43,9 @@ Core, so nothing critical should wait for it.
 |---|---|
 | `src/LendingMarket.sol` | the market |
 | `src/FullMath.sol` | Remco Bloemen's 512-bit `mulDiv` (MIT), as in Uniswap v3 |
-| `test/LendingMarket.t.sol` | 25 tests; HyperCore precompiles mocked at their real addresses |
+| `test/LendingMarket.t.sol` | 26 tests; HyperCore precompiles mocked at their real addresses |
 | `docs/step1-market.md` | the testnet run and the testnet HYPE prices |
-| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r6.md`) |
+| `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r7.md`) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
 
 ## Things this taught (testnet, 2026-10-18)

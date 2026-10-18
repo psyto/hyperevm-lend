@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {LendingMarket, IERC20} from "../../src/LendingMarket.sol";
+
+contract Round7USDC {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// The r6 decimal bound fixes price scaling, but does not bound accrued debt before `_seizeFor`
+/// multiplies it by 1e30. This uses a normal 1,000,000-USDC loan at 100% utilization.
+contract Round7ArithmeticPoC is Test {
+    address internal constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address internal constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address internal constant BBO = 0x000000000000000000000000000000000000080e;
+    uint32 internal constant HYPE_PERP = 135;
+    uint64 internal constant HYPE_PRICE_4 = 400_000; // $40.0000 at szDecimals = 2
+
+    address internal constant LENDER = address(0x701);
+    address internal constant BORROWER = address(0x702);
+
+    Round7USDC internal usdc;
+    LendingMarket internal market;
+
+    function setUp() public {
+        usdc = new Round7USDC();
+        // HYPE's actual szDecimals is 2; the overflow is independent of price scaling and thus
+        // remains reachable under the production configuration admitted by the new bound.
+        market = new LendingMarket(IERC20(address(usdc)), 0, HYPE_PERP, 2, 0, 0, 0);
+        vm.mockCall(ORACLE_PX, abi.encode(HYPE_PERP), abi.encode(HYPE_PRICE_4));
+        vm.mockCall(MARK_PX, abi.encode(HYPE_PERP), abi.encode(HYPE_PRICE_4));
+        vm.mockCall(BBO, abi.encode(HYPE_PERP), abi.encode(HYPE_PRICE_4 - 1, HYPE_PRICE_4 + 1));
+
+        // A 1,000,000-USDC pool borrowed completely: 100% utilization sets the rate to 100% APY.
+        usdc.mint(LENDER, 1_000_000e6);
+        vm.startPrank(LENDER);
+        usdc.approve(address(market), type(uint256).max);
+        market.supply(1_000_000e6);
+        vm.stopPrank();
+
+        // This is the full 1 billion HYPE max supply. At the ordinary $40 oracle it is ample
+        // collateral for the loan, so opening the position obeys all market checks.
+        vm.deal(BORROWER, 1_000_000_000 ether);
+        vm.startPrank(BORROWER);
+        market.depositCollateral{value: 1_000_000_000 ether}();
+        market.borrow(1_000_000e6);
+        vm.stopPrank();
+    }
+
+    function test_POC_accruedDebtOverflowsSeizeForBeforeDivision() public {
+        // At 100% utilization, debt reaches ~4.1e47 base units in 82 years. The close-factor
+        // amount is then ~2e47, and `_seizeFor` evaluates `amount * 1e12 * 10500 / 10000 *
+        // 1e18` before it divides by price: approximately 2.1e77, over uint256.max.
+        skip(82 * 365 days);
+        emit log_named_uint("total debt after 82 years", market.totalDebt());
+        emit log_named_uint("debt shares", market.totalDebtShares());
+
+        // Liquidation reaches _seizeFor after accruing the debt and is permanently uncallable.
+        vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
+        market.liquidate(BORROWER, type(uint256).max);
+    }
+}

@@ -144,7 +144,7 @@ contract LendingMarket {
     function utilisation() public view returns (uint256) {
         uint256 debt = totalDebt();
         uint256 c = cash();
-        return debt == 0 ? 0 : debt * WAD / (c + debt);
+        return debt == 0 ? 0 : FullMath.mulDiv(debt, WAD, c + debt);
     }
 
     /// Yearly borrow rate, WAD.
@@ -174,7 +174,7 @@ contract LendingMarket {
         uint256 debt = debtOf(who);
         if (debt == 0) return 0;
         uint256 value = _value(collateral[who], price);
-        return value == 0 ? type(uint256).max : _divUp(debt * BPS, value);
+        return value == 0 ? type(uint256).max : FullMath.mulDivUp(debt, BPS, value);
     }
 
     // ---------------------------------------------------------------- suppliers
@@ -255,19 +255,21 @@ contract LendingMarket {
         if (ltv <= LIQ_LTV_BPS) revert Healthy(ltv);
 
         uint256 debt = debtOf(borrower);
-        uint256 maxRepay = _divUp(debt * CLOSE_FACTOR_BPS, BPS);
+        uint256 maxRepay = FullMath.mulDivUp(debt, CLOSE_FACTOR_BPS, BPS);
         uint256 repayAmt = amount < maxRepay ? amount : maxRepay;
         uint256 coll = collateral[borrower];
 
         uint256 paid;
         uint256 badDebt;
-        if (_seizeFor(repayAmt, price) >= coll) {
-            // Collateral short: the liquidator pays what all of it is worth (less the bonus) and
-            // takes it all; the rest of the debt is written off. No debt shares are burned, so
-            // however coarse a share has become, this cannot get stuck (reviews r3, r4).
-            // rounded up, so all the collateral is never handed over for nothing (review r5)
-            paid = FullMath.mulDivUp(coll, price * BPS, WAD * (BPS + LIQ_BONUS_BPS) * 1e12);
-            if (paid > debt) paid = debt;
+        // What all the collateral is worth to a liquidator, in USDC (less the bonus), rounded up so
+        // it is never handed over for nothing (review r5). The two paths are chosen by comparing
+        // USDC amounts, so no HYPE amount is computed from a debt that may be huge (review r7).
+        uint256 cover = FullMath.mulDivUp(coll, price * BPS, WAD * (BPS + LIQ_BONUS_BPS) * 1e12);
+        if (repayAmt >= cover) {
+            // Collateral short: the liquidator pays `cover` and takes it all; the rest of the debt
+            // is written off. No debt shares are burned, so however coarse a share has become,
+            // this cannot get stuck (reviews r3, r4).
+            paid = cover < debt ? cover : debt;
             seized = coll;
             badDebt = debt - paid;
             totalDebtShares -= debtShares[borrower];
@@ -276,8 +278,9 @@ contract LendingMarket {
             // Enough collateral: seize exactly what the burned debt shares are worth. Whatever is
             // left stays the borrower's (no "dust" rule: giving it away with the debt written off
             // let a borrower self-liquidate small positions for profit, review r4).
-            paid = _reduceDebt(borrower, repayAmt);
+            paid = _reduceDebt(borrower, repayAmt); // <= repayAmt < cover
             seized = _seizeFor(paid, price);
+            if (seized > coll) seized = coll; // rounding at the edge only
         }
         collateral[borrower] = coll - seized;
         // the buffer takes the loss first, suppliers the rest
@@ -290,7 +293,7 @@ contract LendingMarket {
 
     /// HYPE (18) for `usdcAmt` (6) at `price` (1e18 USD), plus the bonus.
     function _seizeFor(uint256 usdcAmt, uint256 price) internal pure returns (uint256) {
-        return usdcAmt * 1e12 * (BPS + LIQ_BONUS_BPS) / BPS * WAD / price;
+        return FullMath.mulDiv(usdcAmt, 1e12 * (BPS + LIQ_BONUS_BPS) * WAD / BPS, price);
     }
 
     // ---------------------------------------------------------------- internals
@@ -353,7 +356,7 @@ contract LendingMarket {
 
     function _rate(uint256 debt, uint256 c) internal pure returns (uint256) {
         if (debt == 0) return BASE_RATE;
-        uint256 u = debt * WAD / (c + debt);
+        uint256 u = FullMath.mulDiv(debt, WAD, c + debt);
         return u <= KINK ? BASE_RATE : BASE_RATE + JUMP_RATE * (u - KINK) / WAD;
     }
 
