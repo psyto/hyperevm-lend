@@ -26,8 +26,8 @@ Status (2026-10-19): a learning project, not audited, not for real funds.
 - **Prices.** The HYPE perp oracle (0x807). Borrowing and taking collateral out need it to pass
   [hl-price-guard](https://github.com/fabrknt/hl-price-guard)'s checks against the mark and the
   book. Liquidation uses the higher of the oracle and the mark with no bounds: one of them falling
-  alone cannot liquidate anyone, and a real crash, which moves both, cannot be blocked by a messy
-  book.
+  alone cannot liquidate anyone, and a wide or empty book does not block it. A fall counts only
+  once both show it (see Known limits).
 - **Rounding.** Supplier shares carry virtual shares against inflation; debt shares are counted
   1e18 times finer than the index, and all share/index maths and every product with the debt use
   a 512-bit `mulDiv`, so decades of interest cannot make one share coarse or a liquidation
@@ -54,6 +54,13 @@ Only after decades at 100% utilisation (every USDC lent out; the rate is then 10
   (docs/reviews/r8.md).
 - No timestamp is available for the oracle precompile, so an upstream oracle outage cannot be
   detected on-chain.
+- **Liquidation can be held back.** It waits until both the oracle and the mark have fallen. The
+  mark follows HL's book, so a borrower (or anyone) who pushes the HYPE book up keeps the mark,
+  and so the liquidation price, high for as long as they pay to hold the push; a real fall that
+  the mark lags waits the same way. Meanwhile the position can sink below its debt, and the
+  reserve, then suppliers, pay the difference. Behind the price checks instead, a pushed book
+  would stop liquidations outright. Neither delay is measured or bounded here (hl-price-guard
+  docs/safe-limits.md section 5).
 
 ## Why not HyperCore's own borrow/lend
 On HyperCore, borrowing happens only implicitly under portfolio margin (when an order needs more
